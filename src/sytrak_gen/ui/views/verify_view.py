@@ -39,6 +39,18 @@ def nfc_result_check(data: dict, expected: str) -> tuple[bool, str]:
     return True, ""
 
 
+def nfc_read_check(data: dict, expected: str) -> tuple[bool, str]:
+    """Accept a tag read only if the phone read exactly the device MAC (no colons)."""
+    if not data.get("ok"):
+        return False, str(data.get("error") or "could not read the tag")
+    text = str(data.get("text", "")).strip()
+    if not text:
+        return False, "tag is empty"
+    if text != expected:
+        return False, f"tag reads '{text}', expected '{expected}'"
+    return True, text
+
+
 def device_duplicates(records: list[SheetRecord], mac: str) -> list[str]:
     """Duplicate problems that involve this device: its MAC on several rows, or its SEQ shared."""
     mine = [r for r in records if r.mac == mac]
@@ -103,6 +115,8 @@ class VerifyView(ttk.Frame):
         self.verified_saved = False
         self.nfc_pending = False
         self.nfc_done = False
+        self.nfc_read_pending = False
+        self.nfc_read_ok = False
 
     # ------------------------------------------------------------- layout ---
 
@@ -164,27 +178,40 @@ class VerifyView(ttk.Frame):
         right = ttk.Labelframe(self, text=" Verification ", padding=PAD)
         right.grid(row=1, column=1, sticky="nsew", pady=(0, PAD))
         right.columnconfigure(0, weight=1)
+
+        # Mode switch, top right: Verification 1 (write + verify NFC) | Verification 2 (read only).
+        modebar = ttk.Frame(right)
+        modebar.grid(row=0, column=0, sticky="e", pady=(0, 6))
+        self.mode_var = tk.IntVar(value=2 if self.app.settings.qr.verify_mode == 2 else 1)
+        for value, text in ((1, "Verification 1  ·  Write + Read"), (2, "Verification 2  ·  Read only")):
+            ttk.Radiobutton(modebar, text=text, value=value, variable=self.mode_var, bootstyle="primary-toolbutton",
+                            command=self._on_mode_changed, padding=(14, 6)).pack(side="left")
+
         self.chk_device = CheckRow(right, "Device MAC  (J-Link)")
-        self.chk_device.grid(row=0, column=0, sticky="ew")
+        self.chk_device.grid(row=1, column=0, sticky="ew")
         self.chk_store = CheckRow(right, "Stored data  (Google Sheet → SEQ)")
-        self.chk_store.grid(row=1, column=0, sticky="ew")
+        self.chk_store.grid(row=2, column=0, sticky="ew")
         self.chk_sticker = CheckRow(right, "Sticker QR scanned on mobile  =  device MAC")
-        self.chk_sticker.grid(row=2, column=0, sticky="ew")
+        self.chk_sticker.grid(row=3, column=0, sticky="ew")
 
         self.banner = ttk.Label(right, text="", font=BANNER_FONT, anchor="center", padding=12)
-        self.banner.grid(row=3, column=0, sticky="ew", pady=(10, 10))
+        self.banner.grid(row=4, column=0, sticky="ew", pady=(10, 10))
 
         btns = ttk.Frame(right)
-        btns.grid(row=4, column=0, sticky="ew")
-        btns.columnconfigure((0, 1), weight=1, uniform="b")
+        btns.grid(row=5, column=0, sticky="ew")
+        btns.columnconfigure(0, weight=1, uniform="b")
+        btns.columnconfigure(1, weight=2, uniform="b")
         self.manual_btn = ttk.Button(btns, text="Verified Manually", bootstyle="warning-outline", command=self._verify_manually)
         self.manual_btn.grid(row=0, column=0, sticky="ew", padx=(0, 5), ipady=5)
-        self.nfc_btn = ttk.Button(btns, text="Write to NFC", bootstyle="success", command=self._write_nfc)
+        # One NFC button; what it does follows the Verification 1 / 2 switch.
+        self.nfc_btn = ttk.Button(btns, text="", command=self._nfc_action)
         self.nfc_btn.grid(row=0, column=1, sticky="ew", padx=(5, 0), ipady=5)
         self.nfc_lbl = ttk.Label(right, text="", font=LABEL_BOLD, wraplength=560)
-        self.nfc_lbl.grid(row=5, column=0, sticky="w", pady=(10, 0))
+        self.nfc_lbl.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        self.nfc_read_lbl = ttk.Label(right, text="", font=LABEL_BOLD, wraplength=560)
+        self.nfc_read_lbl.grid(row=7, column=0, sticky="w", pady=(4, 0))
         self.sheet_lbl = ttk.Label(right, text="", style="Hint.TLabel", wraplength=560)
-        self.sheet_lbl.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.sheet_lbl.grid(row=8, column=0, sticky="w", pady=(4, 0))
 
         logbox = ttk.Labelframe(self, text=" Activity ", padding=(PAD, 4, PAD, PAD))
         logbox.grid(row=2, column=0, columnspan=2, sticky="nsew")
@@ -227,6 +254,9 @@ class VerifyView(ttk.Frame):
             return
         elif kind == "nfc_result":
             self._on_nfc_result(data)
+            return
+        elif kind == "nfc_read_result":
+            self._on_nfc_read_result(data)
             return
         self._refresh_mobiles()
 
@@ -289,7 +319,7 @@ class VerifyView(ttk.Frame):
 
     def _read_device(self) -> None:
         self._reset_state()
-        for lbl in (self.nfc_lbl, self.sheet_lbl, self.dev_meta):
+        for lbl in (self.nfc_lbl, self.nfc_read_lbl, self.sheet_lbl, self.dev_meta):
             lbl.configure(text="")
         self.dev_mac_lbl.configure(text="—")
         self.dev_seq_lbl.configure(text="—")
@@ -325,7 +355,8 @@ class VerifyView(ttk.Frame):
         self.request_sent = False
         self.raw_qr = ""
         self.manual = self.verified_saved = self.nfc_pending = self.nfc_done = False
-        for lbl in (self.nfc_lbl, self.sheet_lbl, self.dev_meta):
+        self.nfc_read_pending = self.nfc_read_ok = False
+        for lbl in (self.nfc_lbl, self.nfc_read_lbl, self.sheet_lbl, self.dev_meta):
             lbl.configure(text="")
         self.dev_seq_lbl.configure(text="—")
         self.chk_sticker.set("pending", "—")
@@ -426,8 +457,12 @@ class VerifyView(ttk.Frame):
             self.console.write(f"SEQ {self.record.seq_text} verified: device, sheet and sticker match", "success")
             self._mark_sheet("Verified", verified=True)
 
-        if self.nfc_done:
-            self.banner.configure(text="✔  NFC WRITTEN", bootstyle="inverse-success")
+        if self.nfc_done and self.nfc_read_ok:
+            self.banner.configure(text="✔  NFC WRITTEN AND VERIFIED", bootstyle="inverse-success")
+        elif self.nfc_read_ok:
+            self.banner.configure(text="✔  NFC TAG VERIFIED — MATCHES DEVICE", bootstyle="inverse-success")
+        elif self.nfc_done:
+            self.banner.configure(text="✔  NFC WRITTEN — tap the tag again to verify", bootstyle="inverse-info")
         elif auto:
             self.banner.configure(text="✔  DEVICE, SHEET AND STICKER MATCH — VERIFIED", bootstyle="inverse-success")
         elif self.manual:
@@ -443,8 +478,14 @@ class VerifyView(ttk.Frame):
 
         self.send_btn.configure(state="normal" if self.record and self._paired_online() and not self.nfc_done else "disabled")
         self.send_btn.configure(text="②  Send again to mobile" if self.request_sent else "②  Send to mobile for sticker check")
-        can_write = (auto or self.manual) and self._paired_online() and not self.nfc_pending and not self.nfc_done
-        self.nfc_btn.configure(state="normal" if can_write else "disabled")
+        nfc_busy = self.nfc_pending or self.nfc_read_pending
+        if self.mode_var.get() == 1:   # Verification 1: write the tag, then read it back to verify
+            enabled = (auto or self.manual) and self._paired_online() and not nfc_busy and not self.nfc_done
+            self.nfc_btn.configure(text="①  Write + Verify NFC", bootstyle="success")
+        else:                          # Verification 2: read the existing tag only
+            enabled = self.device_mac is not None and self._paired_online() and not nfc_busy
+            self.nfc_btn.configure(text="②  Verify NFC  (read only)", bootstyle="info")
+        self.nfc_btn.configure(state="normal" if enabled else "disabled")
         busy = "busy" in (self.chk_device.state, self.chk_store.state)
         can_manual = self.device_mac is not None and not auto and not self.manual and not busy and not self.nfc_done
         self.manual_btn.configure(state="normal" if can_manual else "disabled")
@@ -486,14 +527,66 @@ class VerifyView(ttk.Frame):
         ok, err = nfc_result_check(data, build_payload(self.device_mac or ""))
         if ok:
             self.nfc_done = True
-            self.nfc_lbl.configure(text=f"✔  NFC tag written and verified  (read back {data.get('read_back')})", bootstyle="success")
-            self.console.write(f"NFC written + verified: tag reads {data.get('read_back')}", "success")
-            self.app.set_status(f"MAC {compact_mac(self.device_mac or '')}: NFC written and verified")
+            self.nfc_lbl.configure(text=f"✔  NFC tag written  (read back {data.get('read_back')})", bootstyle="success")
+            self.console.write(f"NFC written: tag reads {data.get('read_back')}", "success")
             if self.record:
                 self._mark_sheet("NFC Written", nfc_written=True)
+            # Write + Verify: ask for a separate read of the tag to verify it.
+            self._read_nfc(after_write=True)
         else:
-            self.nfc_lbl.configure(text=f"✖  NFC NOT OK: {err}  - press Write to NFC again", bootstyle="danger")
+            self.nfc_lbl.configure(text=f"✖  NFC NOT OK: {err}  - press Write + Verify NFC again", bootstyle="danger")
             self.console.write(f"NFC write failed: {err}", "error")
+        self._update_verdict()
+
+    def _read_nfc(self, after_write: bool = False) -> None:
+        """Ask the phone to read the tag and check it holds this device's MAC (no writing)."""
+        if not (self.app.station and self.device_mac):
+            return
+        expected = build_payload(self.device_mac)
+        seq_text = self.record.seq_text if self.record else ""
+        if not self.app.station.request_nfc_read(seq_text, compact_mac(self.device_mac), expected):
+            Messagebox.show_warning("Connect a mobile first.", "Verify NFC", parent=self)
+            return
+        self.nfc_read_pending = True
+        self.nfc_read_ok = False
+        step = "Verify: tap the tag again on the phone" if after_write else "Tap the NFC tag on the phone"
+        self.nfc_read_lbl.configure(text=f"⏳  {step} - reading it to verify…", bootstyle="info")
+        self.console.write(f"NFC read requested to verify MAC {expected}", "accent")
+        self._update_verdict()
+
+    def _on_nfc_read_result(self, data: dict) -> None:
+        if data.get("id") != self.paired:
+            return
+        if not self.device_mac:
+            self.console.write(f"NFC tag read on the phone ({data.get('text', '')}) - read a device first to verify it", "warning")
+            return
+        self.nfc_read_pending = False
+        ok, detail = nfc_read_check(data, build_payload(self.device_mac))
+        if ok:
+            self.nfc_read_ok = True
+            self.nfc_read_lbl.configure(text=f"✔  NFC tag verified: reads {detail}  =  device MAC", bootstyle="success")
+            self.console.write(f"NFC tag verified: {detail}", "success")
+            self.app.set_status(f"MAC {compact_mac(self.device_mac)}: NFC tag verified")
+            if self.record:
+                self._mark_sheet("NFC Verified", nfc_verified=True)
+        else:
+            self.nfc_read_ok = False
+            self.nfc_read_lbl.configure(text=f"✖  NFC tag NOT verified: {detail}", bootstyle="danger")
+            self.console.write(f"NFC verify failed: {detail}", "error")
+        self._update_verdict()
+
+    def _nfc_action(self) -> None:
+        if self.mode_var.get() == 1:
+            self._write_nfc()   # then reads the tag back automatically (see _on_nfc_result)
+        else:
+            self._read_nfc()
+
+    def _on_mode_changed(self) -> None:
+        mode = self.mode_var.get()
+        self.app.settings.qr.verify_mode = mode
+        self.app.save_settings()
+        self.console.write("Verification 1: write + read the NFC tag" if mode == 1
+                           else "Verification 2: read the NFC tag only (nothing is written)", "muted")
         self._update_verdict()
 
     # -------------------------------------------------------- sheet status ---

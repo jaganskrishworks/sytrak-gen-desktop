@@ -177,7 +177,7 @@ Google **service account**.
 Sheet columns (the header row is written automatically):
 
 ```
-A SEQ | B MAC | C Date Time | D Device Type | E Verified | F Manually Verified | G NFC Written | H Updated At
+A SEQ | B MAC | C Date Time | D Device Type | E Verified | F Manually Verified | G NFC Written | H Updated At | I NFC Verified
 ```
 
 ---
@@ -255,9 +255,15 @@ Plug in any J-Link. With one probe it is selected automatically; with several, p
 4. On the phone, **Scan sticker**, check "✔ Sticker matches", and tap **Confirm & send to PC**.
 5. When device, sheet and sticker all match you see **VERIFIED** and the sheet gets `Verified = Yes`.
    If a check fails, **Verified Manually** lets you override it, and the sheet gets `Manually Verified = Yes`.
-6. **Write to NFC**: on the phone press **WRITE** and tap the tag. The phone reads the tag back.
-   Only on a match does the PC show "NFC written and verified" and set `NFC Written = Yes`.
-   The tag holds the MAC without colons (e.g. `E9EBA0ED7C7C`) as one NDEF text record.
+6. **NFC**: choose the mode with the switch at the **top right of the Verification box**
+   (remembered). The NFC button below does what the mode says:
+   * **Verification 1 · Write + Read** gives **① Write + Verify NFC**. On the phone press **WRITE** and
+     tap the tag; it is read back at once (sheet: `NFC Written = Yes`). Then **tap again**, the tag is
+     read and checked (sheet: `NFC Verified = Yes`). The banner shows "NFC WRITTEN AND VERIFIED".
+   * **Verification 2 · Read only** gives **② Verify NFC (read only)**. The existing tag is only read and
+     checked against the device MAC; nothing is written (sheet: `NFC Verified = Yes`). The operator
+     can also start this on the phone with **Verify NFC tag (read only)**.
+   * The tag holds the MAC without colons (e.g. `E9EBA0ED7C7C`) as one NDEF text record.
 
 ### 8.4 Several stations
 

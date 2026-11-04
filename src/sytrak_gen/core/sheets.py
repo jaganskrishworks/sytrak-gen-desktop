@@ -2,7 +2,8 @@
 
 Columns (header row written automatically):
   A SEQ | B MAC | C Date Time | D Device Type                 <- written by Save
-  E Verified | F Manually Verified | G NFC Written | H Updated At  <- written by Verify QR
+  E Verified | F Manually Verified | G NFC Written | H Updated At | I NFC Verified  <- written by Verify QR
+  (new columns are only ever appended, so older sheets keep their layout)
 """
 from __future__ import annotations
 
@@ -23,7 +24,8 @@ log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 API = "https://sheets.googleapis.com/v4/spreadsheets"
-HEADER = ["SEQ", "MAC", "Date Time", "Device Type", "Verified", "Manually Verified", "NFC Written", "Updated At"]
+HEADER = ["SEQ", "MAC", "Date Time", "Device Type", "Verified", "Manually Verified", "NFC Written", "Updated At",
+          "NFC Verified"]
 LAST_COL = chr(ord("A") + len(HEADER) - 1)  # "H"
 YES = "Yes"
 KEY_FILE_NAME = "google_service_account.json"
@@ -45,6 +47,7 @@ class SheetRecord:
     verified: bool = False
     manually_verified: bool = False
     nfc_written: bool = False
+    nfc_verified: bool = False  # tag read back later and it matched (Verify QR -> Read NFC)
     row: int = field(default=0, compare=False)  # 1-based sheet row (0 = unknown)
 
     @property
@@ -60,6 +63,8 @@ class SheetRecord:
             parts.append("Manual")
         if self.nfc_written:
             parts.append("NFC ✔")
+        if self.nfc_verified:
+            parts.append("NFC read ✔")
         return " · ".join(parts)
 
     @property
@@ -91,6 +96,7 @@ def parse_rows(rows: list[list[str]]) -> list[SheetRecord]:
         records.append(SheetRecord(
             int(seq_text), mac, cells[2], cells[3],
             verified=_is_yes(cells[4]), manually_verified=_is_yes(cells[5]), nfc_written=_is_yes(cells[6]),
+            nfc_verified=_is_yes(cells[8]),
             row=index + 1,
         ))
     return records
@@ -273,23 +279,28 @@ class SheetsClient:
         return audit_rows(self._rows())
 
     def update_status(self, mac: str, *, verified: bool | None = None, manually_verified: bool | None = None,
-                      nfc_written: bool | None = None) -> SheetRecord:
-        """Set the Verify-QR columns (E-H) on the row of ``mac``; ``None`` leaves a column unchanged."""
+                      nfc_written: bool | None = None, nfc_verified: bool | None = None) -> SheetRecord:
+        """Set the Verify-QR columns (E-I) on the row of ``mac``; ``None`` leaves a column unchanged."""
         self.ensure_header()
         record = next((r for r in self.records() if r.mac == mac), None)
         if record is None or not record.row:
             raise SheetError(f"MAC {build_payload(mac)} not found in tab '{self.tab_title()}'")
-        flags = [
-            record.verified if verified is None else verified,
-            record.manually_verified if manually_verified is None else manually_verified,
-            record.nfc_written if nfc_written is None else nfc_written,
-        ]
-        updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cells = [YES if f else "" for f in flags] + [updated_at]
-        self._call("PUT", f"{API}/{self.sheet_id}/values/{self._range(f'E{record.row}:{LAST_COL}{record.row}')}",
-                   params={"valueInputOption": "RAW"}, json={"values": [cells]})
-        log.info("Sheet row %d (%s): verified=%s manual=%s nfc=%s", record.row, mac, *flags)
-        return SheetRecord(record.seq, record.mac, record.created_at, record.device_type, *flags, row=record.row)
+        v = record.verified if verified is None else verified
+        m = record.manually_verified if manually_verified is None else manually_verified
+        w = record.nfc_written if nfc_written is None else nfc_written
+        r = record.nfc_verified if nfc_verified is None else nfc_verified
+        # Only the cells being changed (+ Updated At) are written, in one request, so two
+        # updates that overlap (e.g. NFC Written then NFC Verified) never undo each other.
+        changes = {"E": verified, "F": manually_verified, "G": nfc_written, "I": nfc_verified}
+        tab = self.tab_title().replace("'", "''")
+        data = [{"range": f"'{tab}'!{col}{record.row}", "values": [[YES if flag else ""]]}
+                for col, flag in changes.items() if flag is not None]
+        data.append({"range": f"'{tab}'!H{record.row}", "values": [[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]]})
+        self._call("POST", f"{API}/{self.sheet_id}/values:batchUpdate",
+                   json={"valueInputOption": "RAW", "data": data})
+        log.info("Sheet row %d (%s): verified=%s manual=%s nfc_written=%s nfc_verified=%s", record.row, mac, v, m, w, r)
+        return SheetRecord(record.seq, record.mac, record.created_at, record.device_type,
+                           verified=v, manually_verified=m, nfc_written=w, nfc_verified=r, row=record.row)
 
     MAX_SEQ_RETRIES = 10
 

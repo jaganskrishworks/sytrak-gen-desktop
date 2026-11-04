@@ -11,6 +11,8 @@ Topics (S = station id, M = mobile id = the mobile's MQTT client id):
                       sytrak/S/mobile/M/cmd/scan_ack       {"accepted": true, "reason": ""}
                       sytrak/S/mobile/M/cmd/verify_result  {"ok": true, "mac": "...", "seq": "0001", "reason": ""}
                       sytrak/S/mobile/M/cmd/nfc_write      {"seq": "0001", "mac": "...", "data": "..."}
+                      sytrak/S/mobile/M/cmd/nfc_read       {"seq": "0001", "mac": "...", "expected": "..."}
+  mobile -> station   sytrak/S/mobile/M/evt/nfc_read_result {"ok": true, "text": "E9EBA0ED7C7C", "error": ""}
 
 Every station hosts its own broker, so several stations (each with its own
 mobile) can work side by side on the same network. Only the mobile the
@@ -119,6 +121,13 @@ class StationService:
         if self.paired_id:
             self.send(self.paired_id, "verify_result", {"ok": ok, "mac": mac, "seq": seq, "reason": reason})
 
+    def request_nfc_read(self, seq: str, mac: str, expected: str) -> bool:
+        """Ask the paired mobile to read the tag (verification of an already written tag)."""
+        if not self.paired_id:
+            return False
+        self.send(self.paired_id, "nfc_read", {"seq": seq, "mac": mac, "expected": expected})
+        return True
+
     def request_nfc_write(self, seq: str, mac: str, data: str) -> bool:
         if not self.paired_id:
             return False
@@ -154,3 +163,6 @@ class StationService:
                 self.on_event("scan", {"id": mobile_id, "qr": qr})
         elif event == "nfc_result":
             self.on_event("nfc_result", {"id": mobile_id, **data})
+        elif event == "nfc_read_result":
+            if mobile_id == self.paired_id:
+                self.on_event("nfc_read_result", {"id": mobile_id, **data})

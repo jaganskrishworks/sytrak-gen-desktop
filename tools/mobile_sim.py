@@ -56,6 +56,7 @@ def main() -> int:
     ap.add_argument("--sticker", default="", help="with --auto-sticker: scan this text instead (tests a wrong sticker)")
     ap.add_argument("--nfc-fail", action="store_true")
     ap.add_argument("--nfc-corrupt", default="", help="pretend the tag reads back this text (tests verify failure)")
+    ap.add_argument("--tag-reads", default="", help="answer NFC read requests with this text (tests a wrong tag)")
     ap.add_argument("--exit-after", type=float, default=0, help="quit after N seconds (0 = interactive)")
     args = ap.parse_args()
 
@@ -97,6 +98,12 @@ def main() -> int:
             sticker = args.sticker or data.get("mac", "")
             c.publish(f"{base}/evt/scan", json.dumps({"qr": sticker}), qos=1)
             print(f"-> scan (sticker) {sticker}")
+        elif cmd == "nfc_read":
+            time.sleep(1.0)  # "user taps the tag"
+            text = args.tag_reads or data.get("expected", "")
+            result = {"ok": True, "text": text, "error": ""}
+            c.publish(f"{base}/evt/nfc_read_result", json.dumps(result), qos=1)
+            print(f"-> nfc_read_result {result}")
         elif cmd == "nfc_write":
             time.sleep(1.0)  # "user taps WRITE"
             result = {"seq": data.get("seq"), "ok": not args.nfc_fail, "error": "Tag not writable" if args.nfc_fail else ""}

@@ -26,6 +26,16 @@ def test_nfc_result_requires_matching_read_back():
     assert nfc_result_check({"ok": False, "error": "Tag is read-only"}, "x") == (False, "Tag is read-only")
 
 
+def test_nfc_read_check():
+    from sytrak_gen.ui.views.verify_view import nfc_read_check
+
+    assert nfc_read_check({"ok": True, "text": "E9EBA0ED7C7C"}, "E9EBA0ED7C7C") == (True, "E9EBA0ED7C7C")
+    assert nfc_read_check({"ok": True, "text": "E9EBA0ED7C7D"}, "E9EBA0ED7C7C")[0] is False
+    assert nfc_read_check({"ok": True, "text": ""}, "E9EBA0ED7C7C") == (False, "tag is empty")
+    assert nfc_read_check({"ok": False, "error": "Tag is empty or not NDEF formatted"}, "x") == \
+        (False, "Tag is empty or not NDEF formatted")
+
+
 def test_device_duplicates():
     from sytrak_gen.core.sheets import SheetRecord
     from sytrak_gen.ui.views.verify_view import device_duplicates
@@ -126,6 +136,13 @@ def test_pairing_scan_and_nfc(station):
         assert cmd == "nfc_write" and data["seq"] == "0001"
         a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_result", json.dumps({"seq": "0001", "ok": True}), qos=1)
         assert _wait(events, "nfc_result") == {"id": "mob-a", "seq": "0001", "ok": True}
+
+        # Read-only NFC verification
+        assert svc.request_nfc_read("0001", "E9EBA0ED7C7C", "E9EBA0ED7C7C")
+        assert inbox_a.get(timeout=3) == ("nfc_read", {"seq": "0001", "mac": "E9EBA0ED7C7C", "expected": "E9EBA0ED7C7C"})
+        a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_read_result",
+                  json.dumps({"ok": True, "text": "E9EBA0ED7C7C", "error": ""}), qos=1)
+        assert _wait(events, "nfc_read_result") == {"id": "mob-a", "ok": True, "text": "E9EBA0ED7C7C", "error": ""}
     finally:
         for c in (a, b):
             c.disconnect()

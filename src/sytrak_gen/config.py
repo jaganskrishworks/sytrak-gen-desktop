@@ -33,6 +33,7 @@ class QrSettings:
     seq_start: int = 1
     device_types: str = "UWB-K4W"  # comma separated choices
     device_type: str = ""  # last chosen type (must be chosen before Generate)
+    verify_mode: int = 1  # Verify QR: 1 = write + read-back verify NFC, 2 = read-only NFC verification
 
     @property
     def device_type_list(self) -> list[str]:
