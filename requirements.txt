@@ -1,0 +1,11 @@
+# Runtime dependencies (all bundled into the exe - nothing to install on target PCs)
+ttkbootstrap>=1.10.1,<2
+qrcode>=8.0
+pillow>=11.0
+reportlab>=4.2         # vector A4 label PDF
+google-auth>=2.30      # Google Sheet access (service account)
+requests>=2.32
+
+# USB enumeration on Linux/macOS (Windows uses built-in cfgmgr32 via ctypes)
+pyusb>=1.2.1; sys_platform != "win32"
+libusb-package>=1.0.26; sys_platform != "win32"

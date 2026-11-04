@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Build / test tooling (not shipped in the exe)
+pyinstaller>=6.16
+pytest>=8
+paho-mqtt>=2.1,<3   # tools/mobile_sim.py and broker tests

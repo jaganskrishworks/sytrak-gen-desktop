@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+.pytest_cache/
+*.log
+mock_labels.pdf
+
+# Google service account keys - never commit
+secrets/
+
+# SEGGER binaries are dropped in locally, not committed
+assets/bin/jlink/*
+!assets/bin/jlink/README.md
