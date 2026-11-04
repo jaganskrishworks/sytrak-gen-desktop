@@ -317,7 +317,7 @@ class SheetsClient:
         # RAW keeps "0001" as text instead of turning it into the number 1.
         result = self._call("POST", f"{API}/{self.sheet_id}/values/{self._range('A:D')}:append",
                             params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-                            json={"values": [[format_seq(seq), mac, created_at, device_type]]})
+                            json={"values": [[format_seq(seq), build_payload(mac), created_at, device_type]]})  # MAC without colons
         my_row = appended_row(result)
 
         for _ in range(self.MAX_SEQ_RETRIES):

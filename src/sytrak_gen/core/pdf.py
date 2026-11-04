@@ -9,8 +9,8 @@ Each label box (77.95 x 77.95, 0.86 solid black border outside):
     M : C93FA3ED944C  .  S : 0001      (IBM Plex Sans Medium 4.5, line-height 6.85)
 
 The content block is centred horizontally and vertically in the box.
-Boxes are GAP_X apart horizontally and GAP_Y apart vertically (border edge to
-border edge), filled left-to-right then top-to-bottom from the top-left margin.
+Boxes are filled left-to-right then top-to-bottom from the top-left margin,
+edge to edge (GAP_X / GAP_Y = 0; neighbours share one border line).
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ log = logging.getLogger(__name__)
 
 # --- page -------------------------------------------------------------------
 PAGE_W, PAGE_H = 595, 842          # A4
-MARGIN_LEFT, MARGIN_TOP = 36, 34   # page edge to the outer edge of the first box's border
-GAP_X, GAP_Y = 11, 9               # space between neighbouring boxes (border to border)
+MARGIN_LEFT, MARGIN_TOP = 25, 31   # page edge to the outer edge of the first box's border
+GAP_X, GAP_Y = 0, 0                # space between neighbouring boxes; 0 = edge to edge (shared border line)
 
 # --- one label box ----------------------------------------------------------
 BOX = 77.95
@@ -48,12 +48,20 @@ FONT_SIZE = 4.5
 LINE_HEIGHT = 6.85
 
 OUTER = BOX + 2 * BORDER           # box including its border (79.67)
-PITCH_X = OUTER + GAP_X            # 90.67
-PITCH_Y = OUTER + GAP_Y            # 88.67
+
+
+def _pitch(gap: float) -> float:
+    # Touching boxes share one border line; with a gap each box keeps its own border.
+    return BOX + BORDER if gap == 0 else OUTER + gap
+
+
+PITCH_X, PITCH_Y = _pitch(GAP_X), _pitch(GAP_Y)            # 78.81 each when edge to edge
 # As many boxes as fit on the page from the top-left margin.
-COLS = int((PAGE_W - MARGIN_LEFT + GAP_X) // PITCH_X)      # 6  (right space 25.98)
-ROWS = int((PAGE_H - MARGIN_TOP + GAP_Y) // PITCH_Y)       # 9  (bottom space 18.97)
-PER_PAGE = COLS * ROWS                                     # 54
+COLS = int((PAGE_W - MARGIN_LEFT - (OUTER - PITCH_X)) // PITCH_X)
+ROWS = int((PAGE_H - MARGIN_TOP - (OUTER - PITCH_Y)) // PITCH_Y)
+PER_PAGE = COLS * ROWS
+RIGHT_SPACE = PAGE_W - (MARGIN_LEFT + (COLS - 1) * PITCH_X + OUTER)
+BOTTOM_SPACE = PAGE_H - (MARGIN_TOP + (ROWS - 1) * PITCH_Y + OUTER)
 
 CONTENT_H = LOGO_H + SPACER_LOGO_QR + QR_SIZE + SPACER_QR_TEXT + LINE_HEIGHT
 

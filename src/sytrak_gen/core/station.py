@@ -6,9 +6,11 @@ Topics (S = station id, M = mobile id = the mobile's MQTT client id):
                       sytrak/S/mobile/M/evt/scan         {"qr": "<scanned text>"}
                       sytrak/S/mobile/M/evt/nfc_result   {"seq": "0001", "ok": true, "error": ""}
                       sytrak/S/mobile/M/status           "online" / "offline" (last will)
-  station -> mobile   sytrak/S/mobile/M/cmd/session      {"state": "paired"|"unpaired", ...}  (retained)
-                      sytrak/S/mobile/M/cmd/scan_ack     {"accepted": true, "reason": ""}
-                      sytrak/S/mobile/M/cmd/nfc_write    {"seq": "0001", "mac": "...", "data": "..."}
+  station -> mobile   sytrak/S/mobile/M/cmd/session        {"state": "paired"|"unpaired", ...}  (retained)
+                      sytrak/S/mobile/M/cmd/verify_request {"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "..."}
+                      sytrak/S/mobile/M/cmd/scan_ack       {"accepted": true, "reason": ""}
+                      sytrak/S/mobile/M/cmd/verify_result  {"ok": true, "mac": "...", "seq": "0001", "reason": ""}
+                      sytrak/S/mobile/M/cmd/nfc_write      {"seq": "0001", "mac": "...", "data": "..."}
 
 Every station hosts its own broker, so several stations (each with its own
 mobile) can work side by side on the same network. Only the mobile the
@@ -105,6 +107,17 @@ class StationService:
         if self.paired_id:
             self.send(self.paired_id, "session", {"state": "unpaired", "station": self.station_id, "name": self.name}, retain=True)
         self.paired_id = None
+
+    def request_verify(self, mac: str, seq: str, device_type: str = "") -> bool:
+        """Ask the paired mobile to scan the sticker of this device (it shows the expected MAC/SEQ)."""
+        if not self.paired_id:
+            return False
+        self.send(self.paired_id, "verify_request", {"mac": mac, "seq": seq, "device_type": device_type})
+        return True
+
+    def send_verify_result(self, ok: bool, mac: str, seq: str, reason: str = "") -> None:
+        if self.paired_id:
+            self.send(self.paired_id, "verify_result", {"ok": ok, "mac": mac, "seq": seq, "reason": reason})
 
     def request_nfc_write(self, seq: str, mac: str, data: str) -> bool:
         if not self.paired_id:

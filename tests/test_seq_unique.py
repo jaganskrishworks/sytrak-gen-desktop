@@ -67,6 +67,7 @@ def test_single_station_gets_next_seq():
     sheet = FakeSheet()
     rec = Station(sheet).save("AA:AA:AA:AA:AA:01", "UWB-K4W")
     assert rec.seq == 1 and sheet.rows[1][0] == "0001"
+    assert sheet.rows[1][1] == "AAAAAAAAAA01"  # MAC written without colons
     assert Station(sheet).save("AA:AA:AA:AA:AA:02", "UWB-K4W").seq == 2
 
 

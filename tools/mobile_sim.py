@@ -51,6 +51,9 @@ def main() -> int:
     ap.add_argument("--name", default="Simulated Phone")
     ap.add_argument("--password", default="")
     ap.add_argument("--scan", help="QR text to send as soon as the station pairs")
+    ap.add_argument("--auto-sticker", action="store_true",
+                    help="answer each verify_request by 'scanning' the requested MAC")
+    ap.add_argument("--sticker", default="", help="with --auto-sticker: scan this text instead (tests a wrong sticker)")
     ap.add_argument("--nfc-fail", action="store_true")
     ap.add_argument("--nfc-corrupt", default="", help="pretend the tag reads back this text (tests verify failure)")
     ap.add_argument("--exit-after", type=float, default=0, help="quit after N seconds (0 = interactive)")
@@ -88,6 +91,12 @@ def main() -> int:
         print(f"<- {cmd}: {data}")
         if cmd == "session":
             (paired.set if data.get("state") == "paired" else paired.clear)()
+        elif cmd == "verify_request" and args.auto_sticker:
+            # Pretend the operator scans the sticker of the requested device (or a wrong one).
+            time.sleep(1.0)
+            sticker = args.sticker or data.get("mac", "")
+            c.publish(f"{base}/evt/scan", json.dumps({"qr": sticker}), qos=1)
+            print(f"-> scan (sticker) {sticker}")
         elif cmd == "nfc_write":
             time.sleep(1.0)  # "user taps WRITE"
             result = {"seq": data.get("seq"), "ok": not args.nfc_fail, "error": "Tag not writable" if args.nfc_fail else ""}

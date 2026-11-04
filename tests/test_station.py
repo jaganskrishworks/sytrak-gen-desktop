@@ -26,6 +26,31 @@ def test_nfc_result_requires_matching_read_back():
     assert nfc_result_check({"ok": False, "error": "Tag is read-only"}, "x") == (False, "Tag is read-only")
 
 
+def test_device_duplicates():
+    from sytrak_gen.core.sheets import SheetRecord
+    from sytrak_gen.ui.views.verify_view import device_duplicates
+
+    a, b, c = "AA:AA:AA:AA:AA:01", "AA:AA:AA:AA:AA:02", "AA:AA:AA:AA:AA:03"
+    clean = [SheetRecord(1, a, "t", row=2), SheetRecord(2, b, "t", row=3)]
+    assert device_duplicates(clean, a) == []
+    seq_clash = clean + [SheetRecord(1, c, "t", row=4)]
+    assert device_duplicates(seq_clash, a) == ["SEQ 0001 is also used by row 4 (AAAAAAAAAA03)"]
+    assert device_duplicates(seq_clash, b) == []  # other device unaffected
+    mac_twice = clean + [SheetRecord(5, a, "t", row=6)]
+    assert device_duplicates(mac_twice, a) == ["MAC AAAAAAAAAA01 is on 2 rows: row 2 (SEQ 0001), row 6 (SEQ 0005)"]
+
+
+def test_sticker_check():
+    from sytrak_gen.ui.views.verify_view import sticker_check
+
+    dev = "E9:EB:A0:ED:7C:7C"
+    assert sticker_check("E9EBA0ED7C7C", dev, 1) == (True, "Sticker E9EBA0ED7C7C  =  device MAC")
+    ok, why = sticker_check("E9EBA0ED7C7D", dev, 1)
+    assert not ok and "≠" in why
+    assert not sticker_check("hello", dev, 1)[0]
+    assert not sticker_check('{"mac":"E9:EB:A0:ED:7C:7C","seq":"0002"}', dev, 1)[0]  # old code, wrong SEQ
+
+
 def test_topic_matches():
     assert topic_matches("a/+/c", "a/b/c")
     assert topic_matches("a/#", "a")
@@ -86,6 +111,12 @@ def test_pairing_scan_and_nfc(station):
         a.publish("sytrak/SG-TEST/mobile/mob-a/evt/scan", json.dumps({"qr": qr}), qos=1)
         assert _wait(events, "scan") == {"id": "mob-a", "qr": qr}
         assert inbox_a.get(timeout=3) == ("scan_ack", {"accepted": True, "reason": ""})
+
+        # Device-first verify: PC sends the expected SEQ + MAC, then its verdict.
+        assert svc.request_verify("E9EBA0ED7C7C", "0001", "UWB-K4W")
+        assert inbox_a.get(timeout=3) == ("verify_request", {"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "UWB-K4W"})
+        svc.send_verify_result(True, "E9EBA0ED7C7C", "0001")
+        assert inbox_a.get(timeout=3) == ("verify_result", {"ok": True, "mac": "E9EBA0ED7C7C", "seq": "0001", "reason": ""})
 
         # A mobile cannot publish on behalf of another.
         b.publish("sytrak/SG-TEST/mobile/mob-a/evt/scan", json.dumps({"qr": "spoof"}), qos=1)

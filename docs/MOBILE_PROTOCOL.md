@@ -7,12 +7,15 @@ Wi-Fi network, and each operator pairs with their own phone. A phone talks to
 one station at a time.
 
 ```
- Phone ──(1) UDP discovery──▶ all stations on the LAN
- Phone ──(2) MQTT connect───▶ chosen station  <pc-ip>:1883
+ Phone ──(1) UDP discovery──────▶ all stations on the LAN
+ Phone ──(2) MQTT connect───────▶ chosen station  <pc-ip>:1883
  PC operator selects the phone and clicks Connect  ──▶ phone gets "paired"
- Phone ──(3) scan QR────────▶ station verifies (J-Link MAC + stored record)
- Station ──(4) nfc_write────▶ phone, user taps tag, presses WRITE
- Phone ──(5) nfc_result─────▶ station
+ PC reads the device MAC (J-Link) and finds its SEQ in the sheet
+ Station ──(3) verify_request───▶ phone shows SEQ + MAC, operator scans the sticker
+ Phone ──(4) scan───────────────▶ station: sticker MAC == device MAC ?
+ Station ──(5) verify_result────▶ phone shows Verified / Not verified
+ Station ──(6) nfc_write────────▶ phone, user taps tag, presses WRITE
+ Phone ──(7) nfc_result─────────▶ station (with read-back)
 ```
 
 ## 1. Discover stations (UDP, port 47474)
@@ -59,7 +62,9 @@ publish under its **own** `M`; anything else is ignored.
 | phone → station | `evt/scan`       | `{"qr": "<exact scanned QR text>"}` |
 | phone → station | `evt/nfc_result` | `{"seq": "0001", "ok": true, "error": "", "read_back": "E9EBA0ED7C7C"}` |
 | station → phone | `cmd/session`    | `{"state": "paired" \| "unpaired", "station": "S", "name": "..."}` (retained) |
+| station → phone | `cmd/verify_request` | `{"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "UWB-K4W"}`: the device the PC just read. Show it and ask the operator to scan its sticker. |
 | station → phone | `cmd/scan_ack`   | `{"accepted": true, "reason": ""}` |
+| station → phone | `cmd/verify_result` | `{"ok": true, "mac": "E9EBA0ED7C7C", "seq": "0001", "reason": ""}`: the PC's verdict on the sticker |
 | station → phone | `cmd/nfc_write`  | `{"seq": "0001", "mac": "E9:EB:A0:ED:7C:7C", "data": "<text to write>"}` |
 
 * Scans are accepted only while the phone is **paired** (`cmd/session` state `paired`).

@@ -18,7 +18,7 @@ from PIL import Image, ImageTk
 from ttkbootstrap.dialogs import Messagebox, Querybox
 
 from ...core import pdf
-from ...core.qr import MAX_SEQ, build_payload, format_seq, render_label, thumbnail
+from ...core.qr import MAX_SEQ, build_payload, compact_mac, format_seq, render_label, thumbnail
 from ...core.sheets import SheetRecord, next_seq
 from ..theme import LABEL_BOLD, PAD
 
@@ -179,7 +179,7 @@ class GenerateView(ttk.Frame):
                 self._show_tab(None)
                 return
             tabs, current, tab_err = result
-            self.tab_combo.configure(values=tabs)
+            self._set_tab_values(tabs)
             if tab_err:
                 self.tab_var.set("")
                 self._show_tab(None)
@@ -190,6 +190,13 @@ class GenerateView(ttk.Frame):
             self.refresh()
 
         self.app.run_sheet(work, done)
+
+    def _set_tab_values(self, tabs: list[str]) -> None:
+        """Tab list for this dropdown and the shared one on the Verify tab."""
+        self.tab_combo.configure(values=tabs)
+        verify = getattr(self.app, "verify_view", None)
+        if verify is not None:
+            verify.tab_combo.configure(values=tabs)
 
     def _show_tab(self, tab: str | None) -> None:
         if tab:
@@ -213,8 +220,11 @@ class GenerateView(ttk.Frame):
         self.records = []
         self._fill_list()
         self._show_tab(tab)
-        self.app.set_status(f"Now saving to sheet tab '{tab}'")
+        self.app.set_status(f"Now using sheet tab '{tab}'")
         self.refresh(then=self._check_mac if self.mac else None)
+        verify = getattr(self.app, "verify_view", None)
+        if verify is not None:
+            verify.on_tab_changed()
 
     def _new_tab(self) -> None:
         name = Querybox.get_string("Name of the new sheet tab:", "New tab", parent=self)
@@ -227,7 +237,7 @@ class GenerateView(ttk.Frame):
             if err:
                 Messagebox.show_error(err, "New tab", parent=self)
                 return
-            self.tab_combo.configure(values=[*self.tab_combo.cget("values"), created])
+            self._set_tab_values([*self.tab_combo.cget("values"), created])
             self.tab_var.set(created)
             self._on_tab_selected()
 
@@ -280,7 +290,7 @@ class GenerateView(ttk.Frame):
             if key not in self._thumbs:
                 self._thumbs[key] = ImageTk.PhotoImage(thumbnail(r.payload, 64))
             self.tree.insert("", "end", iid=self._iid(r), image=self._thumbs[key], text=self._box(r),
-                             values=(r.created_at, r.seq_text, r.mac, r.device_type, r.status))
+                             values=(r.created_at, r.seq_text, compact_mac(r.mac), r.device_type, r.status))
         self._update_selection()
 
     # ---------------------------------------------------- list selection ---
@@ -456,7 +466,7 @@ class GenerateView(ttk.Frame):
             self._info(f"✖  {err}", "danger")
             return
         self.mac = mac
-        self.mac_lbl.configure(text=mac)
+        self.mac_lbl.configure(text=compact_mac(mac))
         self._info("Checking Google Sheet…", "Hint.TLabel")
         # Re-read the sheet: another station may have registered this device.
         self.refresh(then=self._check_mac, on_error=lambda: self._set_busy(False))
@@ -487,7 +497,7 @@ class GenerateView(ttk.Frame):
         self.app.save_settings()
         if self._pending:  # keep the preview caption in sync
             seq, image = self._pending
-            self._set_preview(image, f"SEQ {format_seq(seq)}   ·   {self.mac}   ·   {self.device_type}   (not saved)")
+            self._set_preview(image, f"SEQ {format_seq(seq)}   ·   {compact_mac(self.mac)}   ·   {self.device_type}   (not saved)")
 
     def _generate(self) -> None:
         if not self.mac:
@@ -502,7 +512,7 @@ class GenerateView(ttk.Frame):
             return
         image = render_label(build_payload(self.mac), self.mac, seq)
         self._pending = (seq, image)
-        self._set_preview(image, f"SEQ {format_seq(seq)} (expected)   ·   {self.mac}   ·   {self.device_type}   (not saved)")
+        self._set_preview(image, f"SEQ {format_seq(seq)} (expected)   ·   {compact_mac(self.mac)}   ·   {self.device_type}   (not saved)")
         self.gen_btn.configure(state="disabled")
         self.save_btn.configure(state="normal")
         self._info(f"Preview ready - click Save to write it to tab '{self.current_tab}'. "
@@ -535,10 +545,10 @@ class GenerateView(ttk.Frame):
             if record.seq != seq:  # another station saved first - the sheet gave us the next free SEQ
                 label = render_label(build_payload(record.mac), record.mac, record.seq)
                 note = f"  (SEQ {format_seq(seq)} was taken by another station)"
-            self._set_preview(label, f"SEQ {record.seq_text}   ·   {record.mac}   ·   {record.device_type}")
+            self._set_preview(label, f"SEQ {record.seq_text}   ·   {compact_mac(record.mac)}   ·   {record.device_type}")
             self._info(f"✔  Saved SEQ {record.seq_text} ({record.device_type}) to sheet tab '{self.current_tab}'{note}",
                        "success")
-            self.app.set_status(f"Saved SEQ {record.seq_text} ({record.mac}) to tab '{self.current_tab}'")
+            self.app.set_status(f"Saved SEQ {record.seq_text} ({compact_mac(record.mac)}) to tab '{self.current_tab}'")
             # Reload so the list also shows rows other stations saved meanwhile.
             self.refresh(then=lambda: self._select_in_list(record.seq))
 
@@ -566,7 +576,7 @@ class GenerateView(ttk.Frame):
 
     def _show_record(self, record: SheetRecord) -> None:
         self._set_preview(render_label(record.payload, record.mac, record.seq),
-                          f"SEQ {record.seq_text}   ·   {record.mac}   ·   {record.device_type or '-'}   ·   {record.created_at}")
+                          f"SEQ {record.seq_text}   ·   {compact_mac(record.mac)}   ·   {record.device_type or '-'}   ·   {record.created_at}")
 
     def _select_in_list(self, seq: int) -> None:
         record = self.find_by_seq(seq)
