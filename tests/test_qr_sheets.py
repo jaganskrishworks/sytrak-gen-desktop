@@ -57,6 +57,30 @@ def test_parse_rows_reads_status_columns_and_row_numbers():
     assert (second.verified, second.nfc_written, second.row, second.status) == (False, False, 3, "")
 
 
+def test_audit_rows_finds_every_problem():
+    from sytrak_gen.core.sheets import audit_rows
+
+    header = ["SEQ", "MAC", "Date Time", "Device Type"]
+    clean = [header, ["0001", "AA:AA:AA:AA:AA:01", "t"], ["0002", "AA:AA:AA:AA:AA:02", "t"]]
+    assert audit_rows(clean)[1] == []
+
+    bad = [header,
+           ["0001", "AA:AA:AA:AA:AA:01", "t"],
+           ["0002", "AA:AA:AA:AA:AA:02", "t"],
+           ["0002", "AA:AA:AA:AA:AA:03", "t"],      # duplicate SEQ
+           ["0004", "aaaaaaaaaa01", "t"],            # duplicate MAC (different format)
+           ["x12", "AA:AA:AA:AA:AA:05", "t"],        # invalid SEQ
+           [],                                        # blank row - ignored
+           ["0006", "not-a-mac", "t"]]               # invalid MAC
+    records, problems = audit_rows(bad)
+    assert len(records) == 4
+    text = "\n".join(problems)
+    assert "SEQ 0002 is used 2 times: rows 3, 4" in text
+    assert "MAC AAAAAAAAAA01 is used 2 times: rows 2 (SEQ 0001), 5 (SEQ 0004)" in text
+    assert "Row 6: invalid entry" in text and "Row 8: invalid entry" in text
+    assert len(problems) == 4
+
+
 def test_device_type_list():
     from sytrak_gen.config import QrSettings
 

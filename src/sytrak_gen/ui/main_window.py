@@ -27,7 +27,10 @@ log = logging.getLogger(__name__)
 
 class MainWindow(ttk.Window):
     def __init__(self, settings: Settings):
-        super().__init__(title=f"{APP_TITLE}  v{__version__}", themename=THEME, size=(1320, 900), minsize=(1150, 760))
+        # iconphoto=None: stop ttkbootstrap from installing its own default icon, which
+        # would override ours on Windows. Our icon is set in _set_icon().
+        super().__init__(title=f"{APP_TITLE}  v{__version__}", themename=THEME, size=(1320, 900),
+                         minsize=(1150, 760), iconphoto=None)
         self.settings = settings
         configure_styles(self.style)
         self._set_icon()
@@ -62,9 +65,12 @@ class MainWindow(ttk.Window):
         try:
             ico, png = asset_path("icons", "app.ico"), asset_path("icons", "app.png")
             if sys.platform == "win32" and ico.exists():
+                # .ico holds 16-256 px images: Windows picks the right size for the
+                # title bar (small) and the taskbar / Alt-Tab (large).
                 self.iconbitmap(default=str(ico))
             elif png.exists():
-                self.iconphoto(True, ttk.PhotoImage(file=str(png)))
+                self._icon_img = ttk.PhotoImage(file=str(png))
+                self.iconphoto(True, self._icon_img)
         except Exception:
             log.warning("Could not set window icon", exc_info=True)
 

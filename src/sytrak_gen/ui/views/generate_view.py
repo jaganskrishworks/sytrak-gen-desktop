@@ -48,7 +48,8 @@ class GenerateView(ttk.Frame):
         self._busy = False
         self._preview_img: ImageTk.PhotoImage | None = None
         self._thumbs: dict[tuple[int, str], ImageTk.PhotoImage] = {}
-        self._checked: set[int] = set()  # SEQs ticked for the PDF
+        self._checked: set[tuple[int, str]] = set()  # (SEQ, MAC) ticked for the PDF
+        self._by_iid: dict[str, SheetRecord] = {}
         self._generator_visible = True
         self._build()
         self.load_tabs()
@@ -259,27 +260,44 @@ class GenerateView(ttk.Frame):
     def _sheet_status(self, text: str, style: str) -> None:
         self.sheet_lbl.configure(text=text, bootstyle=style)
 
+    # List rows are identified by sheet row (unique even if the sheet holds a duplicate
+    # SEQ); ticks are remembered by (SEQ, MAC) so they always mean the same device.
+
+    @staticmethod
+    def _iid(r: SheetRecord) -> str:
+        return f"row{r.row}"
+
+    @staticmethod
+    def _key(r: SheetRecord) -> tuple[int, str]:
+        return (r.seq, r.mac)
+
     def _fill_list(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        self._checked &= {r.seq for r in self.records}
-        for r in sorted(self.records, key=lambda r: r.seq, reverse=True)[:LIST_LIMIT]:
-            key = (r.seq, r.mac)
+        self._by_iid = {self._iid(r): r for r in self.records}
+        self._checked &= {self._key(r) for r in self.records}
+        for r in sorted(self.records, key=lambda r: (r.seq, r.row), reverse=True)[:LIST_LIMIT]:
+            key = self._key(r)
             if key not in self._thumbs:
                 self._thumbs[key] = ImageTk.PhotoImage(thumbnail(r.payload, 64))
-            self.tree.insert("", "end", iid=str(r.seq), image=self._thumbs[key], text=self._box(r.seq),
+            self.tree.insert("", "end", iid=self._iid(r), image=self._thumbs[key], text=self._box(r),
                              values=(r.created_at, r.seq_text, r.mac, r.device_type, r.status))
         self._update_selection()
 
     # ---------------------------------------------------- list selection ---
 
-    def _box(self, seq: int) -> str:
-        return "   ☑" if seq in self._checked else "   ☐"
+    def _box(self, r: SheetRecord) -> str:
+        return "   ☑" if self._key(r) in self._checked else "   ☐"
 
-    def _set_checked(self, seq: int, checked: bool) -> None:
-        (self._checked.add if checked else self._checked.discard)(seq)
-        iid = str(seq)
-        if self.tree.exists(iid):
-            self.tree.item(iid, text=self._box(seq))
+    def _set_checked(self, r: SheetRecord, checked: bool) -> None:
+        (self._checked.add if checked else self._checked.discard)(self._key(r))
+        if self.tree.exists(self._iid(r)):
+            self.tree.item(self._iid(r), text=self._box(r))
+
+    def _toggle_iid(self, iid: str) -> None:
+        r = self._by_iid.get(iid)
+        if r:
+            self._set_checked(r, self._key(r) not in self._checked)
+            self._update_selection()
 
     def _on_tree_click(self, event) -> str | None:
         # Clicks on the checkbox/thumbnail column tick the row; elsewhere they just preview.
@@ -287,23 +305,19 @@ class GenerateView(ttk.Frame):
             return None
         iid = self.tree.identify_row(event.y)
         if iid:
-            seq = int(iid)
-            self._set_checked(seq, seq not in self._checked)
-            self._update_selection()
+            self._toggle_iid(iid)
         return "break"
 
     def _toggle_focused(self) -> str:
         iid = self.tree.focus()
         if iid:
-            seq = int(iid)
-            self._set_checked(seq, seq not in self._checked)
-            self._update_selection()
+            self._toggle_iid(iid)
         return "break"
 
     def _on_select_all(self) -> None:
         checked = self.select_all_var.get()
         for r in self.records:
-            self._set_checked(r.seq, checked)
+            self._set_checked(r, checked)
         self._update_selection()
 
     def _toggle_all_from_heading(self) -> None:
@@ -340,7 +354,44 @@ class GenerateView(ttk.Frame):
     # ---------------------------------------------------------------- PDF ---
 
     def _generate_pdf(self) -> None:
-        records = sorted((r for r in self.records if r.seq in self._checked), key=lambda r: r.seq)
+        if not self._checked:
+            return
+        wanted = set(self._checked)
+        self.pdf_btn.configure(state="disabled", text="Checking sheet…")
+        self.app.set_status("Checking the whole sheet tab for duplicate SEQs and MACs…")
+
+        def audited(result, err):
+            self.pdf_btn.configure(text="⬇  Generate PDF", state="normal" if self._checked else "disabled")
+            if err:
+                Messagebox.show_error(f"Could not check the Google Sheet:\n{err}\n\nThe PDF was not created.",
+                                      "Generate PDF", parent=self)
+                self.app.set_status("PDF not created - sheet check failed")
+                return
+            records, problems = result
+            self.records = records  # show exactly what was checked
+            self._fill_list()
+            self._update_next_seq()
+            current = {self._key(r) for r in records}
+            missing = sorted(wanted - current)
+            if missing:
+                problems = problems + [
+                    f"Ticked SEQ {format_seq(seq)} / MAC {build_payload(mac)} is no longer in the sheet "
+                    "(changed or removed) - re-check your selection" for seq, mac in missing]
+            if problems:
+                shown = "\n".join(f"•  {p}" for p in problems[:15])
+                more = f"\n…and {len(problems) - 15} more" if len(problems) > 15 else ""
+                Messagebox.show_error(
+                    f"The sheet tab '{self.current_tab}' has {len(problems)} problem{'s' if len(problems) != 1 else ''}. "
+                    f"Fix them in the Google Sheet, then try again.\n\n{shown}{more}\n\nThe PDF was not created.",
+                    "Sheet check failed", parent=self)
+                self.app.set_status(f"PDF not created - {len(problems)} problem(s) in the sheet")
+                return
+            self.app.set_status(f"Sheet check passed: {len(records)} rows, all SEQs and MACs unique")
+            self._write_pdf(sorted((r for r in records if self._key(r) in wanted), key=lambda r: r.seq))
+
+        self.app.run_sheet(lambda client: client.audit(), audited)
+
+    def _write_pdf(self, records: list[SheetRecord]) -> None:
         if not records:
             return
         tab = re.sub(r'[\\/:*?"<>|]+', "_", self.current_tab or "QR")
@@ -451,10 +502,11 @@ class GenerateView(ttk.Frame):
             return
         image = render_label(build_payload(self.mac), self.mac, seq)
         self._pending = (seq, image)
-        self._set_preview(image, f"SEQ {format_seq(seq)}   ·   {self.mac}   ·   {self.device_type}   (not saved)")
+        self._set_preview(image, f"SEQ {format_seq(seq)} (expected)   ·   {self.mac}   ·   {self.device_type}   (not saved)")
         self.gen_btn.configure(state="disabled")
         self.save_btn.configure(state="normal")
-        self._info(f"Preview ready - click Save to write it to tab '{self.current_tab}'.", "Hint.TLabel")
+        self._info(f"Preview ready - click Save to write it to tab '{self.current_tab}'. "
+                   "The final SEQ is fixed when it is saved.", "Hint.TLabel")
 
     def _save(self) -> None:
         if not (self._pending and self.mac):
@@ -473,26 +525,24 @@ class GenerateView(ttk.Frame):
             self._set_busy(False)
             if err:
                 self._info(f"✖  NOT SAVED - {err}", "danger")
-                if "Generate again" in err:
-                    self._pending = None
-                    self.gen_btn.configure(state="normal")
-                    self.refresh()
-                elif "already registered" not in err:
+                if "already registered" not in err:
                     self.save_btn.configure(state="normal")  # e.g. offline: retry with Save
-                self.app.set_status(f"SEQ {format_seq(seq)} not saved")
+                self.app.set_status("QR code not saved")
                 return
             self._pending = None
-            self.records.append(record)
-            self._fill_list()
-            self._update_next_seq()
-            self._select_in_list(record.seq)
-            self._set_preview(image, f"SEQ {record.seq_text}   ·   {record.mac}   ·   {record.device_type}")
-            self._info(f"✔  Saved SEQ {record.seq_text} ({record.device_type}) to sheet tab '{self.current_tab}'", "success")
+            label = image
+            note = ""
+            if record.seq != seq:  # another station saved first - the sheet gave us the next free SEQ
+                label = render_label(build_payload(record.mac), record.mac, record.seq)
+                note = f"  (SEQ {format_seq(seq)} was taken by another station)"
+            self._set_preview(label, f"SEQ {record.seq_text}   ·   {record.mac}   ·   {record.device_type}")
+            self._info(f"✔  Saved SEQ {record.seq_text} ({record.device_type}) to sheet tab '{self.current_tab}'{note}",
+                       "success")
             self.app.set_status(f"Saved SEQ {record.seq_text} ({record.mac}) to tab '{self.current_tab}'")
-            n = len(self.records)
-            self._sheet_status(f"✔  Google Sheet connected  ·  {n} QR code{'s' if n != 1 else ''}", "success")
+            # Reload so the list also shows rows other stations saved meanwhile.
+            self.refresh(then=lambda: self._select_in_list(record.seq))
 
-        self.app.run_sheet(lambda client: client.save(seq, mac, device_type), done)
+        self.app.run_sheet(lambda client: client.save(mac, device_type, self.app.settings.qr.seq_start), done)
 
     # ------------------------------------------------------------ helpers ---
 
@@ -519,14 +569,14 @@ class GenerateView(ttk.Frame):
                           f"SEQ {record.seq_text}   ·   {record.mac}   ·   {record.device_type or '-'}   ·   {record.created_at}")
 
     def _select_in_list(self, seq: int) -> None:
-        iid = str(seq)
-        if self.tree.exists(iid):
-            self.tree.selection_set(iid)
-            self.tree.see(iid)
+        record = self.find_by_seq(seq)
+        if record and self.tree.exists(self._iid(record)):
+            self.tree.selection_set(self._iid(record))
+            self.tree.see(self._iid(record))
 
     def _show_selected(self) -> None:
         sel = self.tree.selection()
-        record = self.find_by_seq(int(sel[0])) if sel else None
+        record = self._by_iid.get(sel[0]) if sel else None
         if record and not self._pending:
             self._show_record(record)
 

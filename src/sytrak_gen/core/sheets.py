@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
 from ..paths import app_dir, user_data_dir
-from .qr import build_payload, format_seq, normalize_mac
+from .qr import MAX_SEQ, build_payload, format_seq, normalize_mac
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +96,35 @@ def parse_rows(rows: list[list[str]]) -> list[SheetRecord]:
     return records
 
 
+def audit_rows(rows: list[list[str]]) -> tuple[list[SheetRecord], list[str]]:
+    """Parse a whole tab and list every problem: invalid rows, duplicate SEQs, duplicate MACs."""
+    records = parse_rows(rows)
+    problems: list[str] = []
+    parsed_rows = {r.row for r in records}
+    for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
+        cells = [str(c).strip() for c in row]
+        if not any(cells) or index in parsed_rows:
+            continue
+        seq_cell = cells[0] if cells else ""
+        mac_cell = cells[1] if len(cells) > 1 else ""
+        problems.append(f"Row {index}: invalid entry (SEQ '{seq_cell}', MAC '{mac_cell}')")
+
+    by_seq: dict[int, list[SheetRecord]] = {}
+    by_mac: dict[str, list[SheetRecord]] = {}
+    for r in records:
+        by_seq.setdefault(r.seq, []).append(r)
+        by_mac.setdefault(r.mac, []).append(r)
+    for seq, group in sorted(by_seq.items()):
+        if len(group) > 1:
+            problems.append(f"SEQ {format_seq(seq)} is used {len(group)} times: rows "
+                            + ", ".join(str(r.row) for r in group))
+    for mac, group in sorted(by_mac.items(), key=lambda kv: kv[1][0].row):
+        if len(group) > 1:
+            problems.append(f"MAC {build_payload(mac)} is used {len(group)} times: rows "
+                            + ", ".join(f"{r.row} (SEQ {r.seq_text})" for r in group))
+    return records, problems
+
+
 def _is_yes(cell: str) -> bool:
     return cell.strip().lower() in ("yes", "y", "true", "1", "✔")
 
@@ -137,13 +168,27 @@ class SheetsClient:
             self._session = AuthorizedSession(creds)
         return self._session
 
+    # Google allows ~60 reads + 60 writes per minute per account (all stations share the
+    # service account). Rate-limit and temporary errors are retried with exponential backoff.
+    RETRY_STATUS = {429, 500, 502, 503, 504}
+    RETRY_DELAYS = (1, 2, 4, 8, 16, 32)
+
     def _call(self, method: str, url: str, **kwargs) -> dict:
-        try:
-            resp = self._http().request(method, url, timeout=self.timeout, **kwargs)
-        except SheetError:
-            raise
-        except Exception as exc:  # network / token refresh errors
-            raise SheetError("Cannot reach Google - check the internet connection") from exc
+        attempt = 0
+        while True:
+            try:
+                resp = self._http().request(method, url, timeout=self.timeout, **kwargs)
+            except SheetError:
+                raise
+            except Exception as exc:  # network / token refresh errors
+                raise SheetError("Cannot reach Google - check the internet connection") from exc
+            if resp.status_code not in self.RETRY_STATUS or attempt >= len(self.RETRY_DELAYS):
+                break
+            delay = self.RETRY_DELAYS[attempt]
+            attempt += 1
+            wait = delay + random.uniform(0, delay / 2)
+            log.warning("Google Sheets %s (attempt %d) - retrying in %.1fs", resp.status_code, attempt, wait)
+            time.sleep(wait)
         if resp.status_code >= 400:
             try:
                 message = resp.json()["error"]["message"]
@@ -217,9 +262,15 @@ class SheetsClient:
         self.ensure_header()
         return f"{meta['properties']['title']} › {tab}"
 
+    def _rows(self) -> list[list[str]]:
+        return self._call("GET", f"{API}/{self.sheet_id}/values/{self._range(f'A:{LAST_COL}')}").get("values", [])
+
     def records(self) -> list[SheetRecord]:
-        rows = self._call("GET", f"{API}/{self.sheet_id}/values/{self._range(f'A:{LAST_COL}')}").get("values", [])
-        return parse_rows(rows)
+        return parse_rows(self._rows())
+
+    def audit(self) -> tuple[list[SheetRecord], list[str]]:
+        """Fresh read of the whole tab + every uniqueness / validity problem found."""
+        return audit_rows(self._rows())
 
     def update_status(self, mac: str, *, verified: bool | None = None, manually_verified: bool | None = None,
                       nfc_written: bool | None = None) -> SheetRecord:
@@ -240,24 +291,85 @@ class SheetsClient:
         log.info("Sheet row %d (%s): verified=%s manual=%s nfc=%s", record.row, mac, *flags)
         return SheetRecord(record.seq, record.mac, record.created_at, record.device_type, *flags, row=record.row)
 
-    def save(self, seq: int, mac: str, device_type: str) -> SheetRecord:
-        """Append a row after re-checking the sheet (other stations write too)."""
+    MAX_SEQ_RETRIES = 10
+
+    def save(self, mac: str, device_type: str, seq_start: int = 1) -> SheetRecord:
+        """Register ``mac`` with a SEQ that is unique in this tab, even with many stations saving at once.
+
+        Write-then-verify: the SEQ is chosen at save time, the row is appended,
+        then the tab is read back. Google appends rows strictly one after
+        another, so if two stations picked the same SEQ the row higher up in
+        the sheet keeps it and the other station renumbers its own row to the
+        next free SEQ and checks again.
+        """
         if not device_type:
             raise SheetError("Choose the device type first")
         self.ensure_header()
         existing = self.records()
-        if any(r.mac == mac for r in existing):
-            taken = next(r for r in existing if r.mac == mac)
+        taken = next((r for r in existing if r.mac == mac), None)
+        if taken:
             raise SheetError(f"MAC already registered as SEQ {taken.seq_text}")
-        if any(r.seq == seq for r in existing):
-            raise SheetError(f"SEQ {format_seq(seq)} was just used by another station - click Generate again")
-        record = SheetRecord(seq, mac, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), device_type)
+
+        seq = next_seq(existing, seq_start)
+        if seq > MAX_SEQ:
+            raise SheetError(f"Sequence limit {MAX_SEQ} reached in this tab - create a new tab")
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # RAW keeps "0001" as text instead of turning it into the number 1.
-        self._call("POST", f"{API}/{self.sheet_id}/values/{self._range('A:D')}:append",
-                   params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-                   json={"values": [[record.seq_text, record.mac, record.created_at, record.device_type]]})
-        log.info("Saved SEQ %s %s (%s) to Google Sheet", record.seq_text, record.mac, device_type)
-        return record
+        result = self._call("POST", f"{API}/{self.sheet_id}/values/{self._range('A:D')}:append",
+                            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+                            json={"values": [[format_seq(seq), mac, created_at, device_type]]})
+        my_row = appended_row(result)
+
+        for _ in range(self.MAX_SEQ_RETRIES):
+            records = self.records()
+            mine = next((r for r in records if r.row == my_row and r.mac == mac), None) if my_row else None
+            mine = mine or next((r for r in records if r.mac == mac), None)
+            if mine is None:
+                raise SheetError("Row was written but cannot be found when reading back - check the sheet")
+            my_row = mine.row
+            target = resolve_seq(records, my_row, seq_start)
+            if target == mine.seq:  # our SEQ is unique (or we are the earliest row holding it)
+                log.info("Saved SEQ %s %s (%s) to row %d", mine.seq_text, mac, device_type, my_row)
+                return mine
+            if target > MAX_SEQ:
+                raise SheetError(f"Sequence limit {MAX_SEQ} reached in this tab - create a new tab")
+            log.warning("SEQ %s already used above row %d - renumbering it to %s",
+                        mine.seq_text, my_row, format_seq(target))
+            self._call("PUT", f"{API}/{self.sheet_id}/values/{self._range(f'A{my_row}')}",
+                       params={"valueInputOption": "RAW"}, json={"values": [[format_seq(target)]]})
+        raise SheetError("Could not get a unique SEQ (too many stations saving at once) - check the sheet")
+
+
+def resolve_seq(records: list[SheetRecord], my_row: int, seq_start: int = 1) -> int:
+    """The SEQ the row ``my_row`` should end up with so that every SEQ in the tab is unique.
+
+    Every station computes this from the same rows and gets the same answer, so
+    simultaneous savers settle in one step. Going down the sheet, the first row
+    with a SEQ keeps it; each later duplicate takes the lowest number above the
+    rows before it that no row is using - unique and without gaps.
+    """
+    used = {r.seq for r in records}
+    top = seq_start - 1          # highest SEQ kept by the rows above
+    taken: set[int] = set()      # SEQs settled so far, going down
+    for r in sorted(records, key=lambda r: r.row):
+        if r.seq in taken:
+            final = top + 1
+            while final in used or final in taken:
+                final += 1
+        else:
+            final = r.seq
+        taken.add(final)
+        top = max(top, final)
+        if r.row == my_row:
+            return final
+    return top + 1
+
+
+def appended_row(append_response: dict) -> int:
+    """Row number from a values:append response ("'Tab'!A12:D12" -> 12); 0 if unknown."""
+    rng = append_response.get("updates", {}).get("updatedRange", "")
+    m = re.search(r"![A-Z]+(\d+)", rng)
+    return int(m.group(1)) if m else 0
 
 
 def next_seq(records: list[SheetRecord], start: int = 1) -> int:
