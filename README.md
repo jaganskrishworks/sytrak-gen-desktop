@@ -298,6 +298,39 @@ Target PCs need **no Python**. Give them:
 * `secrets\<key>.json` next to the exe (or pick the key in Settings on that PC)
 * SEGGER J-Link Software installed (section 3), unless you bundled `JLink.exe`
 
+### 9.1 Linux .deb package
+
+Build **on Linux** (PyInstaller cannot build a Linux program from Windows). Use the oldest
+Ubuntu you install on, because a build from a newer Ubuntu may not start on an older one.
+
+```bash
+sudo apt install python3-venv python3-tk dpkg-dev
+chmod +x build_deb.sh
+./build_deb.sh                                   # -> dist/sytrak-gen_0.1.0_amd64.deb
+```
+
+On each operator PC:
+
+```bash
+sudo apt install ./sytrak-gen_0.1.0_amd64.deb    # menu entry "SyTrak Gen", command: sytrak-gen
+sudo cp sytrak-gen-xxxx.json /opt/sytrak-gen/secrets/   # or pick the key in Settings
+sudo apt remove sytrak-gen                       # uninstall
+```
+
+The SEGGER J-Link Software for Linux (`JLink_Linux_*_x86_64.deb`) is installed separately.
+The version number comes from `src/sytrak_gen/__init__.py`.
+
+### 9.2 Android app (SyTrak Mobile)
+
+```bat
+cd C:\KRISHWORKS\AssetTracking\qr_gen\sytrak_mobile
+flutter build apk --release
+```
+
+Output: `build\app\outputs\flutter-apk\app-release.apk`. Copy it to the phone and install it
+(allow "Install unknown apps"). The version is `version:` in `pubspec.yaml`; raise it for each release.
+The build is signed with the debug key, which is fine for in-house phones. Play Store needs a release key.
+
 ---
 
 ## 10. Developer tools and tests
@@ -338,6 +371,7 @@ Target PCs need **no Python**. Give them:
 ```
 main.py                     entry point (also PyInstaller entry)
 run.bat / build.bat         run from source / build the exe
+build_deb.sh                build the Linux .deb
 requirements.txt            runtime packages (bundled into the exe)
 requirements-dev.txt        build + test tools
 sytrak_gen.spec             PyInstaller build (one file, windowed)

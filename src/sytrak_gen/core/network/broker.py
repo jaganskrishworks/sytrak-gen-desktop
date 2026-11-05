@@ -177,7 +177,12 @@ class EmbeddedBroker:
             tasks = asyncio.all_tasks(loop)
             for task in tasks:
                 task.cancel()
-            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+
+            async def drain() -> None:
+                # gather() must run inside the loop: Python 3.14 has no implicit loop in this thread.
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            loop.run_until_complete(drain())
             loop.close()
             self._loop = None
             self._clients.clear()
