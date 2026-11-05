@@ -61,7 +61,7 @@ publish under its **own** `M`; anything else is ignored.
 | phone → station | `evt/hello`      | `{"name": "<display name>"}` |
 | phone → station | `evt/scan`       | `{"qr": "<exact scanned QR text>"}` |
 | phone → station | `evt/nfc_result` | `{"seq": "0001", "ok": true, "error": "", "read_back": "E9EBA0ED7C7C"}` |
-| phone → station | `evt/nfc_read_result` | `{"ok": true, "text": "E9EBA0ED7C7C", "error": ""}`: content of a tag read for verification (no write). Also sent when the operator starts the read on the phone. |
+| phone → station | `evt/nfc_read_result` | `{"ok": true, "text": "E9EBA0ED7C7C", "error": ""}`: content of a tag read for verification (no write). Only sent in answer to `cmd/nfc_read`. |
 | station → phone | `cmd/nfc_read` | `{"seq": "0001", "mac": "E9EBA0ED7C7C", "expected": "E9EBA0ED7C7C"}`: read the tag (nothing is written) and report its text |
 | station → phone | `cmd/session`    | `{"state": "paired" \| "unpaired", "station": "S", "name": "..."}` (retained) |
 | station → phone | `cmd/verify_request` | `{"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "UWB-K4W"}`: the device the PC just read. Show it and ask the operator to scan its sticker. |
@@ -99,7 +99,7 @@ A missing `read_back` counts as a failure.
 
 ## 6. NFC read (verification only)
 
-When `cmd/nfc_read` arrives, or the operator taps **Verify NFC tag (read only)**:
+When `cmd/nfc_read` arrives (reads are always started from the PC; the phone has no read button):
 
 1. Ask the operator to tap the tag. **Nothing is written.**
 2. Read the first NDEF text record and show it next to `expected` (✔ match / ✖ wrong tag).
@@ -107,8 +107,9 @@ When `cmd/nfc_read` arrives, or the operator taps **Verify NFC tag (read only)**
    (e.g. an empty or non-NDEF tag).
 
 The station accepts the tag only if `text` equals the device MAC without colons, and then sets
-`NFC Verified = Yes` in the sheet. With **Write + Verify NFC** on the PC, `cmd/nfc_read` follows
-automatically after a successful write. If the write screen is still open, the phone queues the
+Verification 1 › `NFC Written = Yes` (read-back after a write) or Verification 2 › `NFC Read = Yes`
+(read only) in the sheet.
+With **Write + Verify NFC** on the PC, `cmd/nfc_read` follows automatically after a successful write. If the write screen is still open, the phone queues the
 read and opens it when that screen closes.
 
 ## Testing without a phone

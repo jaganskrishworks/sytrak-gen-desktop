@@ -112,11 +112,13 @@ class VerifyView(ttk.Frame):
         self.request_sent = False
         self.raw_qr = ""                      # last sticker scan from the mobile
         self.manual = False
-        self.verified_saved = False
+        self.verified_saved: set[int] = set()  # verification blocks (1/2) where Verified = Yes was written
+        self.manual_saved: set[int] = set()    # ... and Manually Verified = Yes
         self.nfc_pending = False
         self.nfc_done = False
         self.nfc_read_pending = False
         self.nfc_read_ok = False
+        self.nfc_read_mode = 0                # 1 = read-back of Verification 1, 2 = Verification 2 (read only)
 
     # ------------------------------------------------------------- layout ---
 
@@ -354,8 +356,10 @@ class VerifyView(ttk.Frame):
         self.record = None
         self.request_sent = False
         self.raw_qr = ""
-        self.manual = self.verified_saved = self.nfc_pending = self.nfc_done = False
+        self.manual = self.nfc_pending = self.nfc_done = False
+        self.verified_saved, self.manual_saved = set(), set()
         self.nfc_read_pending = self.nfc_read_ok = False
+        self.nfc_read_mode = 0
         for lbl in (self.nfc_lbl, self.nfc_read_lbl, self.sheet_lbl, self.dev_meta):
             lbl.configure(text="")
         self.dev_seq_lbl.configure(text="—")
@@ -452,15 +456,19 @@ class VerifyView(ttk.Frame):
 
     def _update_verdict(self) -> None:
         auto = self._auto_verified()
-        if auto and self.record and not self.verified_saved:
-            self.verified_saved = True
+        group = self.mode_var.get()
+        if auto and self.record and group not in self.verified_saved:
+            self.verified_saved.add(group)
             self.console.write(f"SEQ {self.record.seq_text} verified: device, sheet and sticker match", "success")
-            self._mark_sheet("Verified", verified=True)
+            self._mark_sheet(group, "Verified", verified=True)
+        if self.manual and self.record and group not in self.manual_saved:
+            self.manual_saved.add(group)
+            self._mark_sheet(group, "Manually Verified", manually_verified=True)
 
-        if self.nfc_done and self.nfc_read_ok:
-            self.banner.configure(text="✔  NFC WRITTEN AND VERIFIED", bootstyle="inverse-success")
+        if self.nfc_read_ok and self.nfc_read_mode == 1:
+            self.banner.configure(text="✔  VERIFICATION 1 OK — NFC WRITTEN AND VERIFIED", bootstyle="inverse-success")
         elif self.nfc_read_ok:
-            self.banner.configure(text="✔  NFC TAG VERIFIED — MATCHES DEVICE", bootstyle="inverse-success")
+            self.banner.configure(text="✔  VERIFICATION 2 OK — NFC TAG MATCHES DEVICE", bootstyle="inverse-success")
         elif self.nfc_done:
             self.banner.configure(text="✔  NFC WRITTEN — tap the tag again to verify", bootstyle="inverse-info")
         elif auto:
@@ -479,8 +487,11 @@ class VerifyView(ttk.Frame):
         self.send_btn.configure(state="normal" if self.record and self._paired_online() and not self.nfc_done else "disabled")
         self.send_btn.configure(text="②  Send again to mobile" if self.request_sent else "②  Send to mobile for sticker check")
         nfc_busy = self.nfc_pending or self.nfc_read_pending
-        if self.mode_var.get() == 1:   # Verification 1: write the tag, then read it back to verify
-            enabled = (auto or self.manual) and self._paired_online() and not nfc_busy and not self.nfc_done
+        if self.mode_var.get() == 1 and self.nfc_done:   # written, read-back failed or still to do
+            enabled = self._paired_online() and not nfc_busy and not self.nfc_read_ok
+            self.nfc_btn.configure(text="①  Read back again", bootstyle="success")
+        elif self.mode_var.get() == 1:   # Verification 1: write the tag, then read it back to verify
+            enabled = (auto or self.manual) and self._paired_online() and not nfc_busy
             self.nfc_btn.configure(text="①  Write + Verify NFC", bootstyle="success")
         else:                          # Verification 2: read the existing tag only
             enabled = self.device_mac is not None and self._paired_online() and not nfc_busy
@@ -498,9 +509,7 @@ class VerifyView(ttk.Frame):
             return
         self.manual = True
         self.console.write(f"MAC {compact_mac(self.device_mac or '')} verified manually", "warning")
-        if self.record:
-            self._mark_sheet("Manually Verified", manually_verified=True)
-        else:
+        if not self.record:   # with a record, _update_verdict writes Manually Verified to the active block
             self.sheet_lbl.configure(text="Sheet: not updated - this MAC has no row in the selected tab", bootstyle="warning")
         self._update_verdict()
 
@@ -529,9 +538,7 @@ class VerifyView(ttk.Frame):
             self.nfc_done = True
             self.nfc_lbl.configure(text=f"✔  NFC tag written  (read back {data.get('read_back')})", bootstyle="success")
             self.console.write(f"NFC written: tag reads {data.get('read_back')}", "success")
-            if self.record:
-                self._mark_sheet("NFC Written", nfc_written=True)
-            # Write + Verify: ask for a separate read of the tag to verify it.
+            # Write + Verify: ask for a separate read of the tag; NFC Written = Yes once that matches.
             self._read_nfc(after_write=True)
         else:
             self.nfc_lbl.configure(text=f"✖  NFC NOT OK: {err}  - press Write + Verify NFC again", bootstyle="danger")
@@ -549,26 +556,26 @@ class VerifyView(ttk.Frame):
             return
         self.nfc_read_pending = True
         self.nfc_read_ok = False
+        self.nfc_read_mode = 1 if after_write else 2
         step = "Verify: tap the tag again on the phone" if after_write else "Tap the NFC tag on the phone"
         self.nfc_read_lbl.configure(text=f"⏳  {step} - reading it to verify…", bootstyle="info")
         self.console.write(f"NFC read requested to verify MAC {expected}", "accent")
         self._update_verdict()
 
     def _on_nfc_read_result(self, data: dict) -> None:
-        if data.get("id") != self.paired:
-            return
-        if not self.device_mac:
-            self.console.write(f"NFC tag read on the phone ({data.get('text', '')}) - read a device first to verify it", "warning")
+        # Reads are only started from this PC; anything the phone sends unasked is ignored.
+        if data.get("id") != self.paired or not self.nfc_read_pending or not self.device_mac:
             return
         self.nfc_read_pending = False
         ok, detail = nfc_read_check(data, build_payload(self.device_mac))
+        name = f"Verification {self.nfc_read_mode}"
         if ok:
             self.nfc_read_ok = True
-            self.nfc_read_lbl.configure(text=f"✔  NFC tag verified: reads {detail}  =  device MAC", bootstyle="success")
-            self.console.write(f"NFC tag verified: {detail}", "success")
-            self.app.set_status(f"MAC {compact_mac(self.device_mac)}: NFC tag verified")
+            self.nfc_read_lbl.configure(text=f"✔  {name}: tag reads {detail}  =  device MAC", bootstyle="success")
+            self.console.write(f"{name} OK: NFC tag reads {detail}", "success")
+            self.app.set_status(f"MAC {compact_mac(self.device_mac)}: {name} OK")
             if self.record:
-                self._mark_sheet("NFC Verified", nfc_verified=True)
+                self._mark_sheet(self.nfc_read_mode, "NFC Written" if self.nfc_read_mode == 1 else "NFC Read", nfc=True)
         else:
             self.nfc_read_ok = False
             self.nfc_read_lbl.configure(text=f"✖  NFC tag NOT verified: {detail}", bootstyle="danger")
@@ -576,7 +583,9 @@ class VerifyView(ttk.Frame):
         self._update_verdict()
 
     def _nfc_action(self) -> None:
-        if self.mode_var.get() == 1:
+        if self.mode_var.get() == 1 and self.nfc_done:
+            self._read_nfc(after_write=True)
+        elif self.mode_var.get() == 1:
             self._write_nfc()   # then reads the tag back automatically (see _on_nfc_result)
         else:
             self._read_nfc()
@@ -591,12 +600,13 @@ class VerifyView(ttk.Frame):
 
     # -------------------------------------------------------- sheet status ---
 
-    def _mark_sheet(self, column: str, **flags: bool) -> None:
-        """Write Verified / Manually Verified / NFC Written = Yes on this device's sheet row."""
+    def _mark_sheet(self, group: int, column: str, **flags: bool) -> None:
+        """Write e.g. Verified = Yes in the Verification ``group`` (1/2) block of this device's sheet row."""
         mac = self.device_mac
         if not mac:
             return
         tab = self.app.generate_view.current_tab or "?"
+        column = f"Verification {group} › {column}"
         self.sheet_lbl.configure(text=f"Sheet: writing {column} = Yes…", style="Hint.TLabel")
 
         def done(record, err):
@@ -610,7 +620,7 @@ class VerifyView(ttk.Frame):
                 self.record = record
             self.app.generate_view.refresh()
 
-        self.app.run_sheet(lambda client: client.update_status(mac, **flags), done)
+        self.app.run_sheet(lambda client: client.update_status(mac, group, **flags), done)
 
     # ------------------------------------------------------------- preview ---
 

@@ -177,8 +177,14 @@ Google **service account**.
 Sheet columns (the header row is written automatically):
 
 ```
-A SEQ | B MAC | C Date Time | D Device Type | E Verified | F Manually Verified | G NFC Written | H Updated At | I NFC Verified
+row 1:                                    |            Verification 1 (E-H)                  |            Verification 2 (I-L)
+row 2:  SEQ | MAC | Date Time | Device Type | Verified | Manually Verified | NFC Written | Updated At | Verified | Manually Verified | NFC Read | Updated At
 ```
+
+Data starts at row 3. Each verification fills only its own block. Tabs in the older one-header layout
+are upgraded automatically the first time the app opens them: a row is inserted at the top, and old
+values move into the Verification 1 block (old `Verification 2 = Yes` becomes `NFC Read`).
+To be safe, open an older tab on **one** station first after updating.
 
 ---
 
@@ -258,11 +264,12 @@ Plug in any J-Link. With one probe it is selected automatically; with several, p
 6. **NFC**: choose the mode with the switch at the **top right of the Verification box**
    (remembered). The NFC button below does what the mode says:
    * **Verification 1 · Write + Read** gives **① Write + Verify NFC**. On the phone press **WRITE** and
-     tap the tag; it is read back at once (sheet: `NFC Written = Yes`). Then **tap again**, the tag is
-     read and checked (sheet: `NFC Verified = Yes`). The banner shows "NFC WRITTEN AND VERIFIED".
+     tap the tag; then **tap again**, the tag is read and checked (sheet: Verification 1 › `NFC Written = Yes`).
+     If that read fails, press **① Read back again**.
    * **Verification 2 · Read only** gives **② Verify NFC (read only)**. The existing tag is only read and
-     checked against the device MAC; nothing is written (sheet: `NFC Verified = Yes`). The operator
-     can also start this on the phone with **Verify NFC tag (read only)**.
+     checked against the device MAC; nothing is written (sheet: Verification 2 › `NFC Read = Yes`).
+   * `Verified` (sticker match) and `Manually Verified` go into the block of the selected mode.
+   * NFC is always started from the PC. The phone has no NFC button of its own.
    * The tag holds the MAC without colons (e.g. `E9EBA0ED7C7C`) as one NDEF text record.
 
 ### 8.4 Several stations

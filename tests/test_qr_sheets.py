@@ -52,9 +52,37 @@ def test_parse_rows_reads_status_columns_and_row_numbers():
             ["0001", "E9:EB:A0:ED:7C:7C", "t", "UWB-K4W", "Yes", "", "Yes", "t2"],
             ["0002", "AA:BB:CC:DD:EE:FF", "t", "UWB-K4W"]]  # older row without status cells
     first, second = parse_rows(rows)
-    assert (first.verified, first.manually_verified, first.nfc_written, first.row) == (True, False, True, 2)
-    assert first.status == "Verified · NFC ✔"
-    assert (second.verified, second.nfc_written, second.row, second.status) == (False, False, 3, "")
+    assert (first.v1.verified, first.v1.manually_verified, first.v1.nfc, first.row) == (True, False, True, 2)
+    assert first.status == "V1: Verified, NFC written"
+    assert (second.v1.verified, second.v1.nfc, second.row, second.status) == (False, False, 3, "")
+
+
+def test_parse_rows_reads_verification_1_and_2_blocks():
+    from sytrak_gen.core.sheets import GROUP_ROW, HEADER
+
+    rows = [GROUP_ROW, HEADER,
+            ["0001", "E9EBA0ED7C7C", "t", "UWB-K4W", "Yes", "", "Yes", "t2"],
+            ["0002", "AABBCCDDEEFF", "t", "UWB-K4W", "", "", "", "", "Yes", "Yes", "Yes", "t3"]]
+    one, two = parse_rows(rows)
+    assert (one.row, one.v1.verified, one.v1.nfc, one.v2.verified) == (3, True, True, False)
+    assert (two.row, two.v1.verified, two.v2.verified, two.v2.manually_verified, two.v2.nfc, two.v2.updated_at) == \
+        (4, False, True, True, True, "t3")
+    assert two.status == "V2: Verified, Manual, NFC read"
+
+
+def test_migrate_old_single_header_layout():
+    from sytrak_gen.core.sheets import GROUP_ROW, HEADER, audit_rows, migrate_rows
+
+    old = [["SEQ", "MAC", "Date Time", "Device Type", "Verified", "Manually Verified", "NFC Written", "Updated At",
+            "Verification 1", "Verification 2"],
+           ["0001", "E9EBA0ED7C7C", "t", "UWB-K4W", "Yes", "", "", "t2", "Yes", ""],
+           ["0002", "AABBCCDDEEFF", "t", "UWB-K4W", "", "", "", "t3", "", "Yes"]]
+    new = migrate_rows(old)
+    assert new[:2] == [GROUP_ROW, HEADER]
+    one, two = parse_rows(new)
+    assert (one.row, one.v1.verified, one.v1.nfc) == (3, True, True)       # old Verification 1 -> NFC Written
+    assert (two.row, two.v2.nfc, two.v2.updated_at) == (4, True, "t3")     # old Verification 2 -> NFC Read
+    assert audit_rows(new)[1] == []                                         # header rows are not "invalid entries"
 
 
 def test_audit_rows_finds_every_problem():
