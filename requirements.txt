@@ -5,6 +5,7 @@ pillow>=11.0
 reportlab>=4.2         # vector A4 label PDF
 google-auth>=2.30      # Google Sheet access (service account)
 requests>=2.32
+cryptography>=42      # NFC sticker signing (ECDSA P-192) and password derivation
 
 # USB enumeration on Linux/macOS (Windows uses built-in cfgmgr32 via ctypes)
 pyusb>=1.2.1; sys_platform != "win32"

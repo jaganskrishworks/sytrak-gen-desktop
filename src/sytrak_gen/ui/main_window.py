@@ -30,7 +30,7 @@ class MainWindow(ttk.Window):
         # iconphoto=None: stop ttkbootstrap from installing its own default icon, which
         # would override ours on Windows. Our icon is set in _set_icon().
         super().__init__(title=f"{APP_TITLE}  v{__version__}", themename=THEME, size=(1320, 900),
-                         minsize=(1150, 760), iconphoto=None)
+                         minsize=(980, 640), iconphoto=None)
         self.settings = settings
         configure_styles(self.style)
         self._set_icon()

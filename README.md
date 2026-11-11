@@ -177,13 +177,19 @@ Google **service account**.
 Sheet columns (the header row is written automatically):
 
 ```
-row 1:                                    |            Verification 1 (E-H)                  |            Verification 2 (I-L)
-row 2:  SEQ | MAC | Date Time | Device Type | Verified | Manually Verified | NFC Written | Updated At | Verified | Manually Verified | NFC Read | Updated At
+row 1:                                    | Verification 1 (E-L)                                    | Verification 2 (M-T)
+row 2:  SEQ | MAC | Date Time | Device Type
+        | Verified | Manually Verified | NFC Written | Tag UID | Signature | Password | Locked | Updated At
+        | Verified | Manually Verified | NFC Read    | Tag UID | Signature | Password | Locked | Updated At
 ```
 
-Data starts at row 3. Each verification fills only its own block. Tabs in the older one-header layout
-are upgraded automatically the first time the app opens them: a row is inserted at the top, and old
-values move into the Verification 1 block (old `Verification 2 = Yes` becomes `NFC Read`).
+Data starts at row 3. Each verification fills only its own block. `NFC Written` / `NFC Read` = Yes only
+when every NFC check passed; Tag UID, Signature (Valid / Invalid / Missing …), Password (Validated /
+Failed) and Locked (Yes / No) hold the last NFC result.
+
+Older tabs are upgraded automatically the first time the app opens them (the 12-column layout gets
+the four NFC columns per block; the oldest one-header layout gets the second header row too).
+**Update every station before using an upgraded tab**: an old version would write into the wrong columns.
 To be safe, open an older tab on **one** station first after updating.
 
 ---
@@ -221,9 +227,17 @@ Settings do not save automatically.
 | | MAC source | *nRF52 FICR DEVICEADDR* (BLE static address). Use *Custom memory address* if the firmware stores its own MAC. |
 | Station | Station name / ID | empty = PC name. **The station ID must be unique per PC.** |
 | | Broker port / Password | 1883 / empty (optional login `sytrak` + password for phones) |
-| Google Sheet | Sheet URL, Key file | section 5 |
+| Google Sheet | Sheet URL, Key file | section 5 (key: **Browse…** or **From URL…**) |
 | | Device types | comma separated, e.g. `UWB-K4W, UWB-K5` |
 | | First sequence | used only while a sheet tab is empty |
+| NFC signing | Signing key | ECDSA P-192 private key (`.pem`). Empty = `secrets\*.pem` next to the app |
+| | Password secret | hex secret (`.secret`) for the per-tag password. Empty = `secrets\*.secret` |
+| | Key ID | 1-15, stored in the sticker; the mappers must trust it. **Test signing** checks the files |
+
+Secret files (Google key, signing key, password secret): **Browse…** picks a local file, **From URL…**
+downloads it (direct download link). Both check the file first and keep a private copy in
+`%APPDATA%\SyTrakGen\secrets\`. Their contents are never logged or sent to the phone. The mock's
+`dev_nfc_key.pem` is shown as a **DEV key**: stickers signed with it pass dev mappers only.
 
 Settings and logs are stored in `%APPDATA%\SyTrakGen` (Settings → *Data folder* / *Logs*).
 
@@ -261,16 +275,30 @@ Plug in any J-Link. With one probe it is selected automatically; with several, p
 4. On the phone, **Scan sticker**, check "✔ Sticker matches", and tap **Confirm & send to PC**.
 5. When device, sheet and sticker all match you see **VERIFIED** and the sheet gets `Verified = Yes`.
    If a check fails, **Verified Manually** lets you override it, and the sheet gets `Manually Verified = Yes`.
-6. **NFC**: choose the mode with the switch at the **top right of the Verification box**
-   (remembered). The NFC button below does what the mode says:
-   * **Verification 1 · Write + Read** gives **① Write + Verify NFC**. On the phone press **WRITE** and
-     tap the tag; then **tap again**, the tag is read and checked (sheet: Verification 1 › `NFC Written = Yes`).
-     If that read fails, press **① Read back again**.
-   * **Verification 2 · Read only** gives **② Verify NFC (read only)**. The existing tag is only read and
-     checked against the device MAC; nothing is written (sheet: Verification 2 › `NFC Read = Yes`).
-   * `Verified` (sticker match) and `Manually Verified` go into the block of the selected mode.
-   * NFC is always started from the PC. The phone has no NFC button of its own.
-   * The tag holds the MAC without colons (e.g. `E9EBA0ED7C7C`) as one NDEF text record.
+6. **NFC (signed sticker)**: choose the mode with the switch at the **top right of the Verification box**
+   (remembered). The NFC button below does what the mode says, and the phone opens its NFC screen by itself:
+   * **Verification 1 · Write signed sticker** → **① Write signed NFC sticker**. Hold the tag to the phone.
+     The PC signs the sticker for this tag's UID + the device MAC, the phone writes it, reads it back,
+     sets the tag password and checks it, then **locks** the tag (AUTH0 = 02): writing needs the tag's
+     password from then on, reading stays open for the mappers. A locked tag can be written again with
+     Verification 1 (the phone authenticates first). **Settings › Lock tags** switches locking off for test tags.
+   * **Verification 2 · Read only** → **② Verify NFC sticker (read only)**. The tag is read and its
+     password checked; nothing is written.
+   * The PC then checks everything: tag type and UID, MAC record = device, signature present and valid
+     for this UID + MAC, written data, password, lock state. All of it shows in the **NFC sticker**
+     panel (Checks & details · Tag memory (all pages) · Phone steps) and on the phone.
+   * Sheet: `NFC Written` / `NFC Read` = Yes only when every check passed, plus Tag UID, Signature,
+     Password and Locked. `Verified` and `Manually Verified` go into the block of the selected mode.
+   * **One tag per device.** The tag UID that passes Verification 1 is registered to that MAC (sheet:
+     Verification 1 › Tag UID). Verification 1 refuses, before writing, a tag that belongs to another MAC,
+     or a second tag for a MAC that already has one (clear its Tag UID in the sheet to give it a new tag).
+     Verification 2 fails ("Tag UID ↔ MAC") on any tag other than the registered one, even if its
+     signature is valid, and when no tag was registered yet. The sheet is read fresh at every tap.
+   * A tag that cannot be used (random UID, not NTAG21x, frozen configuration, lock bits, not NDEF
+     formatted) is refused with the reason: tap another one. **Cancel NFC job** stops a job; a job
+     with no answer from the phone times out after 2 minutes.
+   * NFC is always started from the PC. The phone has no NFC button of its own. Android phones only.
+   * The signing key and password secret are set in **Settings › NFC signing** (section 7).
 
 ### 8.4 Several stations
 
@@ -342,8 +370,10 @@ The build is signed with the debug key, which is fine for in-house phones. Play 
 .venv\Scripts\python.exe tools\make_icon.py                 :: rebuild app icons from company-logo.png
 ```
 
-* `mobile_sim.py` behaves like the phone. Useful options: `--host 127.0.0.1 --station <ID>`,
-  `--sticker <text>` (wrong sticker), `--nfc-fail`, `--nfc-corrupt <text>`.
+* `mobile_sim.py` behaves like the phone; NFC jobs run on a virtual NTAG213. Useful options:
+  `--host 127.0.0.1 --station <ID>`, `--auto-sticker`, `--sticker <text>` (wrong sticker),
+  `--swap-tag`, `--tag-dropout 9`, `--wrong-password`, `--random-uid`, `--cfglck`.
+* The signed-sticker design and checks: **`docs/NFC_STICKER_PLAN.md`**.
 * The phone protocol is documented in **`docs/MOBILE_PROTOCOL.md`**.
 * PDF label sizes are constants at the top of `src/sytrak_gen/core/pdf.py`.
 

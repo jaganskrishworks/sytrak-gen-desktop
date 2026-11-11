@@ -17,23 +17,119 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_nfc_result_requires_matching_read_back():
-    from sytrak_gen.ui.views.verify_view import nfc_result_check
-
-    assert nfc_result_check({"ok": True, "read_back": "E9EBA0ED7C7C"}, "E9EBA0ED7C7C") == (True, "")
-    assert not nfc_result_check({"ok": True, "read_back": "E9EBA0ED7C"}, "E9EBA0ED7C7C")[0]   # truncated write
-    assert not nfc_result_check({"ok": True}, "E9EBA0ED7C7C")[0]                             # old app, no read-back
-    assert nfc_result_check({"ok": False, "error": "Tag is read-only"}, "x") == (False, "Tag is read-only")
+def _signer():
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from sytrak_gen.core.secrets import Signer
+    return Signer(ec.generate_private_key(ec.SECP192R1()), 1, b"\x33" * 32)
 
 
-def test_nfc_read_check():
-    from sytrak_gen.ui.views.verify_view import nfc_read_check
+def test_nfc_job_write_then_verify():
+    from sytrak_gen.core.nfc_job import VERIFY, WRITE, NfcJob
+    from sytrak_gen.core.ntag_sim import FakeNtag, PhoneDriver
+    from sytrak_gen.core.sheets import SheetRecord, VerifyStatus
 
-    assert nfc_read_check({"ok": True, "text": "E9EBA0ED7C7C"}, "E9EBA0ED7C7C") == (True, "E9EBA0ED7C7C")
-    assert nfc_read_check({"ok": True, "text": "E9EBA0ED7C7D"}, "E9EBA0ED7C7C")[0] is False
-    assert nfc_read_check({"ok": True, "text": ""}, "E9EBA0ED7C7C") == (False, "tag is empty")
-    assert nfc_read_check({"ok": False, "error": "Tag is empty or not NDEF formatted"}, "x") == \
-        (False, "Tag is empty or not NDEF formatted")
+    signer, tag = _signer(), FakeNtag("04C34DEA0B1390")
+    before = [SheetRecord(1, "E9:EB:A0:ED:7C:7C", "t", row=3), SheetRecord(2, "AA:BB:CC:DD:EE:FF", "t", row=4)]
+    after = [SheetRecord(1, "E9:EB:A0:ED:7C:7C", "t", row=3, v1=VerifyStatus(nfc=True, uid="04C34DEA0B1390")),
+             before[1]]
+    job = NfcJob(WRITE, "E9EBA0ED7C7C", "0001", signer)
+    phone = PhoneDriver(tag)
+    reply = job.on_tag({**phone.inspect()}, before)
+    assert reply["ok"] and reply["write"]["page"] == 4 and reply["lock"] is True
+    assert job.on_tag({**phone.inspect()}) is reply                       # resend -> same signature
+    done = phone.write_job(bytes.fromhex(reply["write"]["data"]), bytes.fromhex(reply["pwd"]),
+                           bytes.fromhex(reply["pack"]), lock=reply["lock"])
+    assert done["locked"] and tag.auth0 == 0x02
+    report = job.on_done(done)
+    assert report.ok and job.state == "done", report.failures
+    assert report.sheet_values() == {"uid": "04C34DEA0B1390", "signature": "Valid", "password": "Validated", "locked": "Yes"}
+    verdict = job.verdict()
+    assert verdict["ok"] and verdict["headline"] == "SIGNED STICKER WRITTEN AND VERIFIED"
+    assert "pwd" not in verdict and "pack" not in verdict
+
+    v2 = NfcJob(VERIFY, "E9EBA0ED7C7C", "0001", signer)
+    phone = PhoneDriver(tag)
+    reply = v2.on_tag(phone.inspect(), after)
+    assert reply["ok"] and reply["write"] is None
+    assert v2.on_done(phone.verify_job(bytes.fromhex(reply["pwd"]), bytes.fromhex(reply["pack"]))).ok
+
+    wrong_device = NfcJob(VERIFY, "AABBCCDDEEFF", "0002", signer)
+    phone = PhoneDriver(tag)
+    reply = wrong_device.on_tag(phone.inspect(), after)
+    report = wrong_device.on_done(phone.verify_job(bytes.fromhex(reply["pwd"]), bytes.fromhex(reply["pack"])))
+    # A genuine sticker of another device: its signature is valid, but it is not this device's tag.
+    assert not report.ok and [c.title for c in report.failures] == ["Tag UID ↔ MAC", "MAC = device"]
+
+
+def test_one_tag_per_device():
+    from sytrak_gen.core.nfc_job import VERIFY, WRITE, NfcJob, tag_owner_problem
+    from sytrak_gen.core.ntag_sim import FakeNtag, PhoneDriver
+    from sytrak_gen.core.sheets import SheetRecord, VerifyStatus, audit_rows
+
+    a, b = "E9:EB:A0:ED:7C:7C", "AA:BB:CC:DD:EE:FF"
+    tag_a, tag_b, fresh = "04C34DEA0B1390", "04B34DEA0B1390", "04000000000009"
+    rows = [SheetRecord(1, a, "t", row=3, v1=VerifyStatus(nfc=True, uid=tag_a)),
+            SheetRecord(2, b, "t", row=4, v1=VerifyStatus(nfc=True, uid=tag_b))]
+    A = "E9EBA0ED7C7C"
+    assert tag_owner_problem(WRITE, A, tag_a, rows) == ""                     # rewrite its own tag
+    assert "already belongs to MAC AABBCCDDEEFF" in tag_owner_problem(WRITE, A, tag_b, rows)
+    assert "already has tag 04C34DEA0B1390" in tag_owner_problem(WRITE, A, fresh, rows)
+    assert tag_owner_problem(VERIFY, A, tag_a, rows) == ""
+    assert "wrong tag" in tag_owner_problem(VERIFY, A, fresh, rows)
+    assert "belongs to MAC AABBCCDDEEFF" in tag_owner_problem(VERIFY, A, tag_b, rows)
+    new = [SheetRecord(3, "11:22:33:44:55:66", "t", row=5, v1=VerifyStatus(nfc=False, uid=fresh))]   # failed V1
+    assert tag_owner_problem(WRITE, "112233445566", fresh, new) == ""          # a failed attempt reserves nothing
+    assert "must pass first" in tag_owner_problem(VERIFY, "112233445566", fresh, new)
+
+    # Device A passed V1 on tag X; its V2 is empty, failed on X, or failed on another tag Y.
+    # X stays A's tag in every case; the Y of a failed V2 is not reserved.
+    tag_y = "04000000000077"
+    for a_v2 in (VerifyStatus(), VerifyStatus(nfc=False, uid=tag_a), VerifyStatus(nfc=False, uid=tag_y)):
+        sheet = [SheetRecord(1, a, "t", row=3, v1=VerifyStatus(nfc=True, uid=tag_a), v2=a_v2),
+                 SheetRecord(2, b, "t", row=4)]
+        assert "belongs to MAC E9EBA0ED7C7C" in tag_owner_problem(WRITE, "AABBCCDDEEFF", tag_a, sheet)
+        assert "belongs to MAC E9EBA0ED7C7C" in tag_owner_problem(VERIFY, "AABBCCDDEEFF", tag_a, sheet)
+        assert tag_owner_problem(WRITE, "AABBCCDDEEFF", tag_y, sheet) == ""
+
+    # Verification 1: another device's tag is refused before anything is written
+    signer = _signer()
+    job = NfcJob(WRITE, A, "0001", signer)
+    other = FakeNtag(tag_b)
+    reply = job.on_tag(PhoneDriver(other).inspect(), rows)
+    assert not reply["ok"] and "belongs to MAC" in reply["reason"]
+    assert other.mem[16:20] == bytes([0x03, 0x00, 0xFE, 0x00])
+
+    # Verification 2: a valid sticker on the wrong tag still fails, and the result is recorded
+    stranger = FakeNtag(fresh)
+    PhoneDriver(stranger).write_job(signer.ndef(fresh, A), *signer.password(fresh), lock=True)
+    v2 = NfcJob(VERIFY, A, "0001", signer)
+    phone = PhoneDriver(stranger)
+    reply = v2.on_tag(phone.inspect(), rows)
+    assert reply["ok"]
+    report = v2.on_done(phone.verify_job(bytes.fromhex(reply["pwd"]), bytes.fromhex(reply["pack"])))
+    assert [c.title for c in report.failures] == ["Tag UID ↔ MAC"]
+    assert report.sig_status == "valid"                                        # the signature alone is not enough
+
+    dup = rows + [SheetRecord(9, "11:22:33:44:55:66", "t", row=6, v2=VerifyStatus(nfc=True, uid=tag_a))]
+    assert any("Tag UID 04C34DEA0B1390 is used for 2 devices" in p for p in audit_rows(
+        [["", ""], ["SEQ"]] + [[f"{r.seq:04d}", r.mac, "t", "", *(
+            ["", "", "Yes" if r.v1.nfc else "", r.v1.uid, "", "", "", ""]),
+            "", "", "Yes" if r.v2.nfc else "", r.v2.uid] for r in dup])[1])
+
+
+def test_nfc_job_refuses_bad_tags_and_swaps():
+    from sytrak_gen.core.nfc_job import WRITE, JobError, NfcJob
+    from sytrak_gen.core.ntag_sim import FakeNtag, PhoneDriver
+
+    job = NfcJob(WRITE, "E9EBA0ED7C7C", "0001", _signer())
+    assert not job.on_tag({"uid": "08AABBCC", "version": "", "pages": ""})["ok"]        # random 4-byte UID
+    locked = FakeNtag("04000000000001")
+    locked.mem[10] = 0xFF                                                               # static lock bits
+    assert "lock bits" in job.on_tag(PhoneDriver(locked).inspect())["reason"]
+    assert job.on_tag(PhoneDriver(FakeNtag("04000000000002")).inspect())["ok"]         # job stayed open
+    assert not job.on_tag(PhoneDriver(FakeNtag("04000000000003")).inspect())["ok"]     # swapped mid-job
+    with pytest.raises(JobError):
+        job.on_done({"ok": True, "uid": "04000000000003"})
 
 
 def test_device_duplicates():
@@ -131,18 +227,19 @@ def test_pairing_scan_and_nfc(station):
         # A mobile cannot publish on behalf of another.
         b.publish("sytrak/SG-TEST/mobile/mob-a/evt/scan", json.dumps({"qr": "spoof"}), qos=1)
 
-        assert svc.request_nfc_write("0001", "E9:EB:A0:ED:7C:7C", qr)
-        cmd, data = inbox_a.get(timeout=3)
-        assert cmd == "nfc_write" and data["seq"] == "0001"
-        a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_result", json.dumps({"seq": "0001", "ok": True}), qos=1)
-        assert _wait(events, "nfc_result") == {"id": "mob-a", "seq": "0001", "ok": True}
-
-        # Read-only NFC verification
-        assert svc.request_nfc_read("0001", "E9EBA0ED7C7C", "E9EBA0ED7C7C")
-        assert inbox_a.get(timeout=3) == ("nfc_read", {"seq": "0001", "mac": "E9EBA0ED7C7C", "expected": "E9EBA0ED7C7C"})
-        a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_read_result",
-                  json.dumps({"ok": True, "text": "E9EBA0ED7C7C", "error": ""}), qos=1)
-        assert _wait(events, "nfc_read_result") == {"id": "mob-a", "ok": True, "text": "E9EBA0ED7C7C", "error": ""}
+        # NFC job: PC starts it, the paired mobile answers; an unpaired mobile is ignored.
+        job = {"job_id": "j-1", "mode": "write", "mac": "E9EBA0ED7C7C", "seq": "0001"}
+        assert svc.start_nfc_job(job)
+        assert inbox_a.get(timeout=3) == ("nfc_job", job)
+        b.publish("sytrak/SG-TEST/mobile/mob-b/evt/nfc_tag", json.dumps({"job_id": "j-1", "uid": "x"}), qos=1)
+        a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_tag", json.dumps({"job_id": "j-1", "uid": "04C34DEA0B1390"}), qos=1)
+        assert _wait(events, "nfc_tag") == {"id": "mob-a", "job_id": "j-1", "uid": "04C34DEA0B1390"}
+        assert svc.reply_nfc_job({"job_id": "j-1", "ok": False, "reason": "test"})
+        assert inbox_a.get(timeout=3)[0] == "nfc_job_reply"
+        a.publish("sytrak/SG-TEST/mobile/mob-a/evt/nfc_done", json.dumps({"job_id": "j-1", "ok": False, "id": "spoof"}), qos=1)
+        assert _wait(events, "nfc_done")["id"] == "mob-a"         # the id cannot be overridden by the payload
+        assert svc.cancel_nfc_job("j-1", "stop")
+        assert inbox_a.get(timeout=3) == ("nfc_cancel", {"job_id": "j-1", "reason": "stop"})
     finally:
         for c in (a, b):
             c.disconnect()

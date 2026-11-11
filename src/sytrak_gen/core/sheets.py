@@ -2,13 +2,16 @@
 
 Two header rows (written automatically), data from row 3:
 
-  row 1 |                                        | Verification 1 (merged E-H)     | Verification 2 (merged I-L)
-  row 2 | A SEQ | B MAC | C Date Time | D Device Type | E Verified | F Manually Verified | G NFC Written | H Updated At
-        |                                        | I Verified | J Manually Verified | K NFC Read | L Updated At
+  row 1 |                                    | Verification 1 (merged E-L)       | Verification 2 (merged M-T)
+  row 2 | A SEQ | B MAC | C Date Time | D Device Type
+        | E Verified | F Manually Verified | G NFC Written | H Tag UID | I Signature | J Password | K Locked | L Updated At
+        | M Verified | N Manually Verified | O NFC Read    | P Tag UID | Q Signature | R Password | S Locked | T Updated At
 
   A-D are written by Save. Each verification fills its own block: Verified = sticker matched,
-  NFC Written = tag written and read back OK (Verification 1), NFC Read = read-only check OK (Verification 2).
-  Tabs with the older single header row are upgraded in place (see SheetsClient.ensure_header).
+  NFC Written = signed sticker written and every check passed (Verification 1), NFC Read = read-only
+  check passed (Verification 2). Tag UID / Signature / Password / Locked hold the last NFC result.
+  Tabs in an older layout (one header row, or the 12-column blocks) are upgraded in place
+  (see SheetsClient.ensure_header).
 """
 from __future__ import annotations
 
@@ -22,23 +25,30 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from ..paths import app_dir, user_data_dir
 from .qr import MAX_SEQ, build_payload, format_seq, normalize_mac
 
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 API = "https://sheets.googleapis.com/v4/spreadsheets"
+NFC_COLUMNS = ["Tag UID", "Signature", "Password", "Locked"]
 HEADER = ["SEQ", "MAC", "Date Time", "Device Type",
-          "Verified", "Manually Verified", "NFC Written", "Updated At",   # Verification 1
-          "Verified", "Manually Verified", "NFC Read", "Updated At"]     # Verification 2
-GROUP_ROW = ["", "", "", "", "Verification 1", "", "", "", "Verification 2", "", "", ""]
+          "Verified", "Manually Verified", "NFC Written", *NFC_COLUMNS, "Updated At",   # Verification 1
+          "Verified", "Manually Verified", "NFC Read", *NFC_COLUMNS, "Updated At"]      # Verification 2
+BLOCK = 8                     # columns per verification block
+BLOCK_START = {1: 4, 2: 12}   # 0-based column index of each block
+GROUP_ROW = [""] * len(HEADER)
+GROUP_ROW[BLOCK_START[1]], GROUP_ROW[BLOCK_START[2]] = "Verification 1", "Verification 2"
 HEADER_ROWS = 2
-LAST_COL = chr(ord("A") + len(HEADER) - 1)  # "L"
-# Columns of each verification block: (Verified, Manually Verified, NFC, Updated At)
-GROUP_COLS = {1: ("E", "F", "G", "H"), 2: ("I", "J", "K", "L")}
+LAST_COL = chr(ord("A") + len(HEADER) - 1)  # "T"
+# Order of the fields inside a block (= VerifyStatus fields)
+BLOCK_FIELDS = ("verified", "manually_verified", "nfc", "uid", "signature", "password", "locked", "updated_at")
+GROUP_COLS = {g: dict(zip(BLOCK_FIELDS, (chr(65 + start + i) for i in range(BLOCK)))) for g, start in BLOCK_START.items()}
+# The previous layout (12 columns, 4 per block) - upgraded automatically.
+LEGACY_HEADER = ["SEQ", "MAC", "Date Time", "Device Type",
+                 "Verified", "Manually Verified", "NFC Written", "Updated At",
+                 "Verified", "Manually Verified", "NFC Read", "Updated At"]
 YES = "Yes"
-KEY_FILE_NAME = "google_service_account.json"
 
 _ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _GID_RE = re.compile(r"[#?&]gid=(\d+)")
@@ -53,7 +63,11 @@ class VerifyStatus:
     """One verification block of a row."""
     verified: bool = False           # sticker matched device + sheet
     manually_verified: bool = False
-    nfc: bool = False                # 1: NFC Written (written + read back OK), 2: NFC Read (read-only check OK)
+    nfc: bool = False                # 1: NFC Written (signed sticker OK), 2: NFC Read (read-only check OK)
+    uid: str = ""                    # last NFC result: tag UID, Signature (Valid / Invalid / …),
+    signature: str = ""              # Password (Validated / Failed) and Locked (Yes / No)
+    password: str = ""
+    locked: str = ""
     updated_at: str = ""
 
     def parts(self, nfc_text: str) -> list[str]:
@@ -115,38 +129,56 @@ def parse_rows(rows: list[list[str]]) -> list[SheetRecord]:
         cells = [str(c).strip() for c in row] + [""] * len(HEADER)
         records.append(SheetRecord(
             int(seq_text), mac, cells[2], cells[3],
-            v1=_group(cells[4:8]), v2=_group(cells[8:12]),
+            v1=_group(cells, 1), v2=_group(cells, 2),
             row=index + 1,
         ))
     return records
 
 
-def _group(cells: list[str]) -> VerifyStatus:
-    return VerifyStatus(_is_yes(cells[0]), _is_yes(cells[1]), _is_yes(cells[2]), cells[3])
+def _group(cells: list[str], group: int) -> VerifyStatus:
+    c = cells[BLOCK_START[group]:BLOCK_START[group] + BLOCK]
+    return VerifyStatus(_is_yes(c[0]), _is_yes(c[1]), _is_yes(c[2]), *c[3:8])
 
 
 def _is_header_row(index: int, cells: list[str]) -> bool:
     return index <= HEADER_ROWS and (not cells or cells[0] in ("", "SEQ"))
 
 
+def _trim(row: list[str]) -> list[str]:
+    while row and row[-1] == "":
+        row.pop()
+    return row
+
+
+def upgrade_legacy_rows(rows: list[list[str]]) -> list[list[str]]:
+    """12-column layout (4 columns per block) -> the 20-column layout; header rows replaced.
+
+    Old block 1 E-H (Verified, Manual, NFC Written, Updated At) -> E, F, G, L;
+    old block 2 I-L -> M, N, O, T. The new Tag UID / Signature / Password / Locked cells stay empty.
+    """
+    out = [list(GROUP_ROW), list(HEADER)]
+    for row in rows[HEADER_ROWS:]:
+        c = [str(x) for x in row] + [""] * len(LEGACY_HEADER)
+        blank = [""] * len(NFC_COLUMNS)
+        out.append(_trim(c[:4] + c[4:7] + blank + [c[7]] + c[8:11] + blank + [c[11]]))
+    return out
+
+
 def migrate_rows(rows: list[list[str]]) -> list[list[str]]:
-    """Old single-header layout -> new two-header layout (returned rows include both header rows).
+    """Oldest single-header layout -> the current two-header layout (returned rows include both header rows).
 
     Old columns: E Verified | F Manually Verified | G NFC Written | H Updated At
                  [I NFC Verified / Verification 1] [J Verification 2]
     Old E-H become the Verification 1 block; an old I "Yes" also counts as NFC Written;
     an old J "Yes" becomes Verification 2 NFC Read.
     """
-    out = [list(GROUP_ROW), list(HEADER)]
+    legacy = [[""] * len(LEGACY_HEADER), list(LEGACY_HEADER)]
     for row in rows[1:]:
-        c = [str(x) for x in row] + [""] * len(HEADER)
+        c = [str(x) for x in row] + [""] * len(LEGACY_HEADER)
         nfc_written = c[6] or (YES if _is_yes(c[8]) else "")
         nfc_read = YES if _is_yes(c[9]) else ""
-        new = c[:6] + [nfc_written, c[7], "", "", nfc_read, c[7] if nfc_read else ""]
-        while new and new[-1] == "":
-            new.pop()
-        out.append(new)
-    return out
+        legacy.append(c[:6] + [nfc_written, c[7], "", "", nfc_read, c[7] if nfc_read else ""])
+    return upgrade_legacy_rows(legacy)
 
 
 def audit_rows(rows: list[list[str]]) -> tuple[list[SheetRecord], list[str]]:
@@ -175,6 +207,16 @@ def audit_rows(rows: list[list[str]]) -> tuple[list[SheetRecord], list[str]]:
         if len(group) > 1:
             problems.append(f"MAC {build_payload(mac)} is used {len(group)} times: rows "
                             + ", ".join(f"{r.row} (SEQ {r.seq_text})" for r in group))
+    # One NFC tag per device: a tag UID that passed for one MAC must not appear on another.
+    by_uid: dict[str, dict[str, SheetRecord]] = {}
+    for r in records:
+        for g in (r.v1, r.v2):
+            if g.nfc and g.uid.strip():
+                by_uid.setdefault(g.uid.strip().upper(), {})[r.mac] = r
+    for uid, owners in by_uid.items():
+        if len(owners) > 1:
+            problems.append(f"Tag UID {uid} is used for {len(owners)} devices: "
+                            + ", ".join(f"row {r.row} (MAC {build_payload(r.mac)})" for r in owners.values()))
     return records, problems
 
 
@@ -183,11 +225,10 @@ def _is_yes(cell: str) -> bool:
 
 
 def find_key_file(configured: str = "") -> Path | None:
-    """Configured path → <app folder>/secrets/*.json → %APPDATA%/SyTrakGen/google_service_account.json"""
-    candidates = [Path(configured)] if configured else []
-    candidates += sorted((app_dir() / "secrets").glob("*.json"))
-    candidates.append(user_data_dir() / KEY_FILE_NAME)
-    return next((p for p in candidates if p.is_file()), None)
+    """Configured path → <app folder>/secrets/*.json → <data folder>/secrets/google_service_account.json
+    (→ <data folder>/google_service_account.json, where older versions kept it)."""
+    from .secrets import GOOGLE_KEY, find
+    return find(GOOGLE_KEY, configured)
 
 
 class SheetsClient:
@@ -301,8 +342,8 @@ class SheetsClient:
             rows = {"sheetId": gid, "startRowIndex": 0, "endRowIndex": HEADER_ROWS,
                     "startColumnIndex": 0, "endColumnIndex": len(HEADER)}
             group_ranges = [{"sheetId": gid, "startRowIndex": 0, "endRowIndex": 1,
-                             "startColumnIndex": ord(cols[0]) - 65, "endColumnIndex": ord(cols[-1]) - 64}
-                            for cols in GROUP_COLS.values()]
+                             "startColumnIndex": start, "endColumnIndex": start + BLOCK}
+                            for start in BLOCK_START.values()]
             requests = [{"unmergeCells": {"range": {**rows, "endRowIndex": 1}}}]
             requests += [{"mergeCells": {"range": r, "mergeType": "MERGE_ALL"}} for r in group_ranges]
             requests += [
@@ -324,9 +365,11 @@ class SheetsClient:
         rows = [[str(c).strip() for c in r] for r in values] + [[], []]
         first, second = rows[0], rows[1]
         if first[:1] == ["SEQ"]:
-            self._migrate(tab)                       # older layout: one header row
+            self._migrate(tab)                       # oldest layout: one header row
         elif second == HEADER:
             pass
+        elif second == LEGACY_HEADER:
+            self._upgrade_legacy(tab)                # 12-column layout: add the NFC columns
         elif first[:1] in ([], [""]) and second[:1] in ([], [""], ["SEQ"]):
             self._write_header(tab)                  # empty tab or incomplete header
         else:  # never write the header over someone's data
@@ -342,12 +385,23 @@ class SheetsClient:
         self._call("POST", f"{API}/{self.sheet_id}:batchUpdate", json={"requests": [{"insertDimension": {
             "range": {"sheetId": self._sheet_gid(tab), "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
             "inheritFromBefore": False}}]})
-        new = migrate_rows(old)
-        data = [{"range": f"'{tab.replace(chr(39), chr(39) * 2)}'!A1:{LAST_COL}{HEADER_ROWS}", "values": new[:HEADER_ROWS]}]
+        self._write_layout(tab, migrate_rows(old))
+
+    def _upgrade_legacy(self, tab: str) -> None:
+        """12-column blocks -> 20-column blocks: move each row's status cells to their new columns."""
+        old = self._call("GET", f"{API}/{self.sheet_id}/values/{self._range('A:L')}").get("values", [])
+        if len(old) < HEADER_ROWS or [str(c).strip() for c in old[1]] != LEGACY_HEADER:
+            return  # another station has just upgraded it
+        log.warning("Upgrading tab %s to the layout with Tag UID / Signature / Password / Locked (%d rows)", tab, len(old))
+        self._write_layout(tab, upgrade_legacy_rows(old))
+
+    def _write_layout(self, tab: str, new: list[list[str]]) -> None:
+        """Write both header rows and the status columns E..T of every data row, in one request."""
+        quoted = tab.replace(chr(39), chr(39) * 2)
+        data = [{"range": f"'{quoted}'!A1:{LAST_COL}{HEADER_ROWS}", "values": new[:HEADER_ROWS]}]
         status = [(r + [""] * len(HEADER))[4:len(HEADER)] for r in new[HEADER_ROWS:]]
         if status:
-            data.append({"range": f"'{tab.replace(chr(39), chr(39) * 2)}'!E{HEADER_ROWS + 1}:{LAST_COL}{len(new)}",
-                         "values": status})
+            data.append({"range": f"'{quoted}'!E{HEADER_ROWS + 1}:{LAST_COL}{len(new)}", "values": status})
         self._call("POST", f"{API}/{self.sheet_id}/values:batchUpdate", json={"valueInputOption": "RAW", "data": data})
         self._format_header(tab)
 
@@ -382,28 +436,30 @@ class SheetsClient:
         return audit_rows(self._rows())
 
     def update_status(self, mac: str, group: int, *, verified: bool | None = None,
-                      manually_verified: bool | None = None, nfc: bool | None = None) -> SheetRecord:
+                      manually_verified: bool | None = None, nfc: bool | None = None,
+                      uid: str | None = None, signature: str | None = None,
+                      password: str | None = None, locked: str | None = None) -> SheetRecord:
         """Set the Verification ``group`` (1 or 2) block on the row of ``mac``; ``None`` leaves a cell unchanged."""
         if group not in GROUP_COLS:
             raise ValueError(f"unknown verification {group}")
         record = next((r for r in self.records() if r.mac == mac), None)
         if record is None or not record.row:
             raise SheetError(f"MAC {build_payload(mac)} not found in tab '{self.tab_title()}'")
-        col_verified, col_manual, col_nfc, col_updated = GROUP_COLS[group]
+        cols = GROUP_COLS[group]
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Only the cells being changed (+ Updated At) are written, in one request, so two
         # updates that overlap (e.g. Verified then NFC Written) never undo each other.
-        changes = {col_verified: verified, col_manual: manually_verified, col_nfc: nfc}
+        flags = {"verified": verified, "manually_verified": manually_verified, "nfc": nfc}
+        texts = {"uid": uid, "signature": signature, "password": password, "locked": locked}
+        values = {name: (YES if flag else "") for name, flag in flags.items() if flag is not None}
+        values.update({name: str(text) for name, text in texts.items() if text is not None})
+        values["updated_at"] = now
         tab = self.tab_title().replace("'", "''")
-        data = [{"range": f"'{tab}'!{col}{record.row}", "values": [[YES if flag else ""]]}
-                for col, flag in changes.items() if flag is not None]
-        data.append({"range": f"'{tab}'!{col_updated}{record.row}", "values": [[now]]})
+        data = [{"range": f"'{tab}'!{cols[name]}{record.row}", "values": [[value]]} for name, value in values.items()]
         self._call("POST", f"{API}/{self.sheet_id}/values:batchUpdate",
                    json={"valueInputOption": "RAW", "data": data})
-        old = record.group(group)
-        new = VerifyStatus(old.verified if verified is None else verified,
-                           old.manually_verified if manually_verified is None else manually_verified,
-                           old.nfc if nfc is None else nfc, now)
+        changes = {name: (value == YES if name in flags else value) for name, value in values.items()}
+        new = replace(record.group(group), **changes)
         log.info("Sheet row %d (%s): Verification %d = %s", record.row, mac, group, new)
         return replace(record, v1=new if group == 1 else record.v1, v2=new if group == 2 else record.v2)
 

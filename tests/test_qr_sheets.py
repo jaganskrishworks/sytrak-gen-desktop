@@ -60,14 +60,33 @@ def test_parse_rows_reads_status_columns_and_row_numbers():
 def test_parse_rows_reads_verification_1_and_2_blocks():
     from sytrak_gen.core.sheets import GROUP_ROW, HEADER
 
+    assert len(HEADER) == 20 and HEADER[11] == HEADER[19] == "Updated At"
     rows = [GROUP_ROW, HEADER,
-            ["0001", "E9EBA0ED7C7C", "t", "UWB-K4W", "Yes", "", "Yes", "t2"],
-            ["0002", "AABBCCDDEEFF", "t", "UWB-K4W", "", "", "", "", "Yes", "Yes", "Yes", "t3"]]
+            ["0001", "E9EBA0ED7C7C", "t", "UWB-K4W", "Yes", "", "Yes", "04B34DEA0B1390", "Valid", "Validated", "No", "t2"],
+            ["0002", "AABBCCDDEEFF", "t", "UWB-K4W"] + [""] * 8 + ["Yes", "Yes", "Yes", "04AA", "Invalid", "Failed", "No", "t3"]]
     one, two = parse_rows(rows)
     assert (one.row, one.v1.verified, one.v1.nfc, one.v2.verified) == (3, True, True, False)
+    assert (one.v1.uid, one.v1.signature, one.v1.password, one.v1.locked, one.v1.updated_at) == \
+        ("04B34DEA0B1390", "Valid", "Validated", "No", "t2")
     assert (two.row, two.v1.verified, two.v2.verified, two.v2.manually_verified, two.v2.nfc, two.v2.updated_at) == \
         (4, False, True, True, True, "t3")
+    assert two.v2.signature == "Invalid"
     assert two.status == "V2: Verified, Manual, NFC read"
+
+
+def test_upgrade_12_column_layout():
+    from sytrak_gen.core.sheets import GROUP_COLS, GROUP_ROW, HEADER, LEGACY_HEADER, upgrade_legacy_rows
+
+    old = [["", "", "", "", "Verification 1", "", "", "", "Verification 2"], LEGACY_HEADER,
+           ["0001", "E9EBA0ED7C7C", "t", "UWB-K4W", "Yes", "", "Yes", "t2", "", "", "Yes", "t3"],
+           ["0002", "AABBCCDDEEFF", "t", "UWB-K4W"]]
+    new = upgrade_legacy_rows(old)
+    assert new[:2] == [GROUP_ROW, HEADER]
+    one, two = parse_rows(new)
+    assert (one.v1.verified, one.v1.nfc, one.v1.updated_at, one.v1.uid) == (True, True, "t2", "")
+    assert (one.v2.nfc, one.v2.updated_at) == (True, "t3")
+    assert new[3] == ["0002", "AABBCCDDEEFF", "t", "UWB-K4W"]
+    assert GROUP_COLS[1]["uid"] == "H" and GROUP_COLS[2]["locked"] == "S" and GROUP_COLS[2]["updated_at"] == "T"
 
 
 def test_migrate_old_single_header_layout():

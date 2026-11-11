@@ -6,7 +6,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 datas = [("assets", "assets")]
 datas += collect_data_files("ttkbootstrap")
 
-hiddenimports = collect_submodules("ttkbootstrap") + ["PIL.ImageTk", "qrcode.image.pil"]
+# PIL._tkinter_finder / _imagingtk: loaded at runtime by ImageTk on Linux, PyInstaller misses them.
+hiddenimports = collect_submodules("ttkbootstrap") + [
+    "PIL.ImageTk", "PIL._tkinter_finder", "PIL._imagingtk", "qrcode.image.pil",
+]
 
 a = Analysis(
     ["main.py"],

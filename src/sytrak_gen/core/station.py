@@ -10,9 +10,9 @@ Topics (S = station id, M = mobile id = the mobile's MQTT client id):
                       sytrak/S/mobile/M/cmd/verify_request {"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "..."}
                       sytrak/S/mobile/M/cmd/scan_ack       {"accepted": true, "reason": ""}
                       sytrak/S/mobile/M/cmd/verify_result  {"ok": true, "mac": "...", "seq": "0001", "reason": ""}
-                      sytrak/S/mobile/M/cmd/nfc_write      {"seq": "0001", "mac": "...", "data": "..."}
-                      sytrak/S/mobile/M/cmd/nfc_read       {"seq": "0001", "mac": "...", "expected": "..."}
-  mobile -> station   sytrak/S/mobile/M/evt/nfc_read_result {"ok": true, "text": "E9EBA0ED7C7C", "error": ""}
+  NFC jobs (see core/nfc_job.py; started only by the PC):
+  station -> mobile   cmd/nfc_job, cmd/nfc_job_reply, cmd/nfc_verdict, cmd/nfc_cancel
+  mobile -> station   evt/nfc_tag, evt/nfc_progress, evt/nfc_done
 
 Every station hosts its own broker, so several stations (each with its own
 mobile) can work side by side on the same network. Only the mobile the
@@ -121,18 +121,25 @@ class StationService:
         if self.paired_id:
             self.send(self.paired_id, "verify_result", {"ok": ok, "mac": mac, "seq": seq, "reason": reason})
 
-    def request_nfc_read(self, seq: str, mac: str, expected: str) -> bool:
-        """Ask the paired mobile to read the tag (verification of an already written tag)."""
+    def _send_paired(self, name: str, data: dict) -> bool:
         if not self.paired_id:
             return False
-        self.send(self.paired_id, "nfc_read", {"seq": seq, "mac": mac, "expected": expected})
+        self.send(self.paired_id, name, data)
         return True
 
-    def request_nfc_write(self, seq: str, mac: str, data: str) -> bool:
-        if not self.paired_id:
-            return False
-        self.send(self.paired_id, "nfc_write", {"seq": seq, "mac": mac, "data": data})
-        return True
+    def start_nfc_job(self, request: dict) -> bool:
+        """cmd/nfc_job: the paired mobile waits for a tag tap (write or verify)."""
+        return self._send_paired("nfc_job", request)
+
+    def reply_nfc_job(self, reply: dict) -> bool:
+        """cmd/nfc_job_reply: what to write + the tag password (never logged), or a refusal."""
+        return self._send_paired("nfc_job_reply", reply)
+
+    def send_nfc_verdict(self, verdict: dict) -> bool:
+        return self._send_paired("nfc_verdict", verdict)
+
+    def cancel_nfc_job(self, job_id: str, reason: str = "") -> bool:
+        return self._send_paired("nfc_cancel", {"job_id": job_id, "reason": reason})
 
     # ------------------------------------------------- broker thread hook ---
 
@@ -161,8 +168,8 @@ class StationService:
             else:
                 self.send(mobile_id, "scan_ack", {"accepted": True, "reason": ""})
                 self.on_event("scan", {"id": mobile_id, "qr": qr})
-        elif event == "nfc_result":
-            self.on_event("nfc_result", {"id": mobile_id, **data})
-        elif event == "nfc_read_result":
+        elif event in ("nfc_tag", "nfc_progress", "nfc_done"):
             if mobile_id == self.paired_id:
-                self.on_event("nfc_read_result", {"id": mobile_id, **data})
+                self.on_event(event, {**data, "id": mobile_id})
+            else:
+                log.warning("Ignoring %s from unpaired mobile %s", event, mobile_id)

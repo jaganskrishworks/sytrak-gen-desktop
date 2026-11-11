@@ -48,6 +48,17 @@ class SheetSettings:
 
 
 @dataclass
+class NfcSettings:
+    """Signed NFC sticker secrets (paths of the private copies; the URL only records where they came from)."""
+    key_file: str = ""      # empty -> secrets/*.pem next to the app, or <data folder>/secrets/nfc_signing_key.pem
+    key_url: str = ""
+    key_id: int = 1         # 1-15, written into the sticker's signature record
+    secret_file: str = ""   # empty -> secrets/*.secret next to the app, or <data folder>/secrets/nfc_password.secret
+    secret_url: str = ""
+    lock: bool = True       # Verification 1 locks the tag (AUTH0 = 02, reads stay open); an open tag fails
+
+
+@dataclass
 class StationSettings:
     station_id: str = ""  # empty -> derived from the PC name
     name: str = ""  # shown to mobiles; empty -> PC name
@@ -91,6 +102,7 @@ class Settings:
     qr: QrSettings = field(default_factory=QrSettings)
     station: StationSettings = field(default_factory=StationSettings)
     sheet: SheetSettings = field(default_factory=SheetSettings)
+    nfc: NfcSettings = field(default_factory=NfcSettings)
 
     @staticmethod
     def path() -> Path:
@@ -118,6 +130,7 @@ class Settings:
             qr=_from_dict(QrSettings, data.get("qr")),
             station=_from_dict(StationSettings, data.get("station")),
             sheet=_from_dict(SheetSettings, data.get("sheet")),
+            nfc=_from_dict(NfcSettings, data.get("nfc")),
         )
 
     def save(self) -> None:
