@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from .nfc_sticker import CHIPS, NDEF_START_PAGE, PAGE, Chip
+from .nfc_sticker import CHIPS, FACTORY_PACK, FACTORY_PWD, NDEF_START_PAGE, PAGE, Chip
 
 GET_VERSION, READ, WRITE, PWD_AUTH = 0x60, 0x30, 0xA2, 0x1B
 MAX_TRIES = 3
@@ -218,6 +218,59 @@ class PhoneDriver:
             return self._done(True, password="validated" if validated else "failed", pwd_written=True, locked=locked)
         except TagIOError as exc:
             return self._done(False, "write", f"{exc} - hold the tag still and try again")
+
+    def erase_job(self, blank: bytes, pwd: bytes, pack: bytes) -> dict:
+        """Make the tag new again: blank NDEF area, unlocked, factory password.
+
+        Order matters for dropouts: clear data (with the old password), AUTH0 = FF (unlock), then
+        ACCESS and PWD/PACK - after the unlock no password is needed, so a retry always works."""
+        try:
+            if self.chip is None:
+                self.inspect()
+            if self.chip is None:
+                return self._done(False, "check", "Not an NTAG213/215/216")
+            c = self.chip.cfg0 * PAGE
+            cfg0, cfg1 = self.pages[c:c + 4], self.pages[c + 4:c + 8]
+            if cfg1[0] & 0x40:
+                return self._done(False, "check", "CFGLCK set - the configuration is frozen, this tag cannot be reset")
+            protected = cfg0[3] <= self.chip.last_page
+            if protected and not self._auth(pwd, pack):
+                return self._done(False, "pwd_auth", "Tag is locked with another password - it cannot be erased")
+
+            # 1. Clear the NDEF area: only pages that differ from blank.
+            start = NDEF_START_PAGE * PAGE
+            changed = 0
+            for i in range(0, len(blank), PAGE):
+                if self.pages[start + i:start + i + PAGE] != blank[i:i + PAGE]:
+                    self._write_pages(NDEF_START_PAGE + i // PAGE, blank[i:i + PAGE], pwd, pack, protected)
+                    changed += 1
+            self._step("erase", True, f"{changed} page(s) cleared" if changed else "NDEF area was already blank")
+            for _ in range(MAX_TRIES):
+                back = self._read_all()[start:start + len(blank)]
+                bad = next((i for i in range(0, len(blank), PAGE) if back[i:i + PAGE] != blank[i:i + PAGE]), None)
+                if bad is None:
+                    self._step("readback", True, f"{len(blank)} B blank")
+                    break
+                self._step("readback", False, f"page {NDEF_START_PAGE + bad // PAGE} not blank - clearing again")
+                self._write_pages(NDEF_START_PAGE + bad // PAGE, blank[bad:bad + PAGE], pwd, pack, protected)
+            else:
+                return self._done(False, "readback", "The NDEF area is still not blank after 3 tries")
+
+            # 2. Unlock: AUTH0 = FF (keep CFG0 bytes 0-2). From here on no page needs the password.
+            if protected:
+                self._write_pages(self.chip.cfg0, cfg0[0:3] + b"\xFF", pwd, pack, True)
+            self._step("unlock", True, "AUTH0 = FF: open" if protected else "was not locked")
+            # 3. ACCESS: clear PROT, CFGLCK, AUTHLIM (keep the NFC counter bits and CFG1 bytes 1-3).
+            self._write_pages(self.chip.cfg0 + 1, bytes([cfg1[0] & 0x38]) + cfg1[1:4], pwd, pack, False)
+            # 4. Factory password: PWD FFFFFFFF, PACK 0000.
+            self._write_pages(self.chip.cfg0 + 2, FACTORY_PWD + FACTORY_PACK + b"\x00\x00", pwd, pack, False)
+            self._step("password", True, "PWD FFFFFFFF and PACK 0000 written (factory)")
+            self._reconnect()
+            default = self._auth(FACTORY_PWD, FACTORY_PACK)
+            self._step("pwd_auth", default, "factory password answers PACK 0000" if default else "factory password refused")
+            return self._done(True, password="default" if default else "failed", pwd_written=True)
+        except TagIOError as exc:
+            return self._done(False, "erase", f"{exc} - hold the tag still and try again")
 
     def verify_job(self, pwd: bytes, pack: bytes) -> dict:
         try:

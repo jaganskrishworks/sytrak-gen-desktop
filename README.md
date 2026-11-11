@@ -282,6 +282,12 @@ Plug in any J-Link. With one probe it is selected automatically; with several, p
      sets the tag password and checks it, then **locks** the tag (AUTH0 = 02): writing needs the tag's
      password from then on, reading stays open for the mappers. A locked tag can be written again with
      Verification 1 (the phone authenticates first). **Settings › Lock tags** switches locking off for test tags.
+   * **Verification 1 · ⌫ Erase NFC tag (make it new)** (under the NFC button, after reading the device):
+     confirm, then hold the tag to the phone. The sticker data is removed (empty NDEF message, zeros),
+     the lock is removed (AUTH0 = FF) and the tag password goes back to the factory one (FFFFFFFF / PACK 0000);
+     the PC checks all of it. If it was this device's tag, its sheet blocks are freed: `NFC Written`/`NFC Read`
+     = No, Tag UID cleared, Signature = `Erased`, so the device can get a new tag and the tag can be reused.
+     Another device's tag is refused. Tags with lock bits or CFGLCK can never be erased (refused).
    * **Verification 2 · Read only** → **② Verify NFC sticker (read only)**. The tag is read and its
      password checked; nothing is written.
    * The PC then checks everything: tag type and UID, MAC record = device, signature present and valid
@@ -291,7 +297,8 @@ Plug in any J-Link. With one probe it is selected automatically; with several, p
      Password and Locked. `Verified` and `Manually Verified` go into the block of the selected mode.
    * **One tag per device.** The tag UID that passes Verification 1 is registered to that MAC (sheet:
      Verification 1 › Tag UID). Verification 1 refuses, before writing, a tag that belongs to another MAC,
-     or a second tag for a MAC that already has one (clear its Tag UID in the sheet to give it a new tag).
+     or a second tag for a MAC that already has one (erase the old tag, or clear its Tag UID in the sheet,
+     to give it a new tag).
      Verification 2 fails ("Tag UID ↔ MAC") on any tag other than the registered one, even if its
      signature is valid, and when no tag was registered yet. The sheet is read fresh at every tap.
    * A tag that cannot be used (random UID, not NTAG21x, frozen configuration, lock bits, not NDEF

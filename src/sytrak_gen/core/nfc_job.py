@@ -1,6 +1,9 @@
-"""One NFC job = one tag write (Verification 1) or one tag check (Verification 2), driven by the PC.
+"""One NFC job = one tag write or erase (Verification 1) or one tag check (Verification 2), driven by the PC.
 
-  PC  cmd/nfc_job        {job_id, mode, mac, seq}                 -> phone waits for a tap
+Erase makes a tag new again: blank NDEF area, unlocked (AUTH0 FF), factory password (FFFFFFFF / 0000).
+The reply carries the tag's current password and the blank area; the PC then judges the result.
+
+  PC  cmd/nfc_job        {job_id, mode, mac, seq}                 -> phone waits for a tap   (mode write|verify|erase)
   ph  evt/nfc_tag        {job_id, uid, version, pages}            -> NfcJob.on_tag() checks + signs
   PC  cmd/nfc_job_reply  {job_id, ok, reason, write, pwd, pack, lock}
   ph  evt/nfc_progress   {job_id, step, ok, detail}               (log only)
@@ -20,7 +23,7 @@ from . import nfc_sticker as st
 from .qr import compact_mac
 from .secrets import Signer
 
-WRITE, VERIFY = "write", "verify"
+WRITE, VERIFY, ERASE = "write", "verify", "erase"     # ERASE belongs to Verification 1
 JOB_TIMEOUT_S = 120
 
 
@@ -47,6 +50,8 @@ def tag_owner_problem(mode: str, mac: str, uid: str, records: list) -> str:
             return (f"tag {uid} already belongs to MAC {compact_mac(r.mac)} (SEQ {r.seq_text}, row {r.row}) - "
                     "one tag per device: use this device's own tag")
     mine = registered_uid(me)
+    if mode == ERASE:      # this device's own tag, or a tag no device owns
+        return ""
     if mode == WRITE:
         if mine and mine != uid:
             return (f"this device already has tag {mine} (Verification 1) - use that tag, or clear its "
@@ -59,6 +64,17 @@ def tag_owner_problem(mode: str, mac: str, uid: str, records: list) -> str:
     if mine != uid:
         return f"wrong tag: this device's tag is {mine}, the tapped tag is {uid}"
     return ""
+
+
+def erase_sheet_groups(mac: str, uid: str, records: list) -> list[int]:
+    """Verification blocks (1/2) of this device whose Tag UID is the erased tag - they get cleared."""
+    me = next((r for r in records if compact_mac(r.mac) == mac), None)
+    if me is None:
+        return []
+    return [g for g in (1, 2) if me.group(g).uid.strip().upper() == uid.upper()]
+
+
+ERASED_FIELDS = {"nfc": False, "uid": "", "signature": "Erased", "password": "", "locked": ""}
 
 
 @dataclass
@@ -78,10 +94,16 @@ class NfcJob:
     owner_check: st.Check | None = None   # "Tag UID ↔ MAC" result from the sheet (one tag per device)
     error: str = ""
     steps: list[dict] = field(default_factory=list)
+    erase_groups: list[int] = field(default_factory=list)   # erase: sheet blocks to clear afterwards
 
     @property
     def group(self) -> int:
-        return 1 if self.mode == WRITE else 2
+        return 2 if self.mode == VERIFY else 1
+
+    @property
+    def title(self) -> str:
+        return {WRITE: "Verification 1 · write signed sticker", VERIFY: "Verification 2 · verify sticker",
+                ERASE: "Verification 1 · erase tag"}[self.mode]
 
     @property
     def active(self) -> bool:
@@ -111,8 +133,8 @@ class NfcJob:
             return self._refuse("this job is no longer active on the PC")
         problem = self._tag_problem(uid, data)
         owner = tag_owner_problem(self.mode, self.mac, uid, records) if records is not None and not problem else ""
-        if owner and self.mode == WRITE:
-            problem = owner
+        if owner and self.mode in (WRITE, ERASE):
+            problem = owner if self.mode == WRITE else owner.split(" - ")[0] + " - read that device to erase its tag"
         if problem:   # the job stays open: the operator can tap another tag
             self.error = problem
             return self._refuse(problem)
@@ -123,17 +145,25 @@ class NfcJob:
         else:
             me = next((r for r in records if compact_mac(r.mac) == self.mac), None)
             known = registered_uid(me) == uid
-            self.owner_check = st.Check("Tag UID ↔ MAC", st.OK,
-                                        f"tag {uid} is this device's registered tag" if known else
-                                        f"tag {uid} is free - it becomes this device's tag (one tag per device)")
+            if self.mode == ERASE:
+                self.erase_groups = erase_sheet_groups(self.mac, uid, records)
+                detail = (f"tag {uid} is this device's tag - its sheet entry is cleared after erasing" if self.erase_groups
+                          else f"tag {uid} belongs to no device - the sheet is not changed")
+            else:
+                detail = (f"tag {uid} is this device's registered tag" if known else
+                          f"tag {uid} is free - it becomes this device's tag (one tag per device)")
+            self.owner_check = st.Check("Tag UID ↔ MAC", st.OK, detail)
         self.uid = uid
-        pwd, pack = self.signer.password(uid)
+        pwd, pack = self.signer.password(uid)   # erase: the password the tag has now
         write = None
         if self.mode == WRITE:
             self.ndef = self.signer.ndef(uid, self.mac)
             write = {"page": st.NDEF_START_PAGE, "data": self.ndef.hex().upper()}
+        elif self.mode == ERASE:
+            chip = st.CHIPS[st.hexbytes(data.get("version", ""))[6]]
+            write = {"page": st.NDEF_START_PAGE, "data": st.blank_user_area(chip).hex().upper()}
         self.state = "working"
-        self.reply = {"job_id": self.job_id, "ok": True, "reason": "", "write": write,
+        self.reply = {"job_id": self.job_id, "ok": True, "reason": "", "mode": self.mode, "write": write,
                       "pwd": pwd.hex().upper(), "pack": pack.hex().upper(),
                       "lock": self.lock and self.mode == WRITE}
         return self.reply
@@ -158,7 +188,11 @@ class NfcJob:
             return "the phone could not read the whole tag - hold it still and tap again"
         config = st.TagConfig(pages[chip.cfg0 * 4:chip.cfg0 * 4 + 4], pages[chip.cfg0 * 4 + 4:chip.cfg0 * 4 + 8], chip)
         if config.cfglck:
-            return "the tag's configuration is frozen (CFGLCK) - take another one"
+            return "the tag's configuration is frozen (CFGLCK) - " + (
+                "it cannot be reset" if self.mode == ERASE else "take another one")
+        if self.mode == ERASE:
+            locks = st.lock_bits_problem(pages, chip)
+            return f"this tag cannot be erased: {locks}" if locks else ""
         if pages[12] != 0xE1:
             return f"the tag is not NDEF formatted (CC {pages[12:16].hex(' ').upper()}) - take another one"
         if pages[10] or pages[11]:
@@ -176,11 +210,15 @@ class NfcJob:
         if self.uid and uid and uid != self.uid:
             raise JobError(f"the phone finished on another tag ({uid}, expected {self.uid})")
         self.uid = self.uid or uid
-        self.report = st.analyze(self.mode, self.uid, str(data.get("version", "")), str(data.get("pages", "")),
-                                 device_mac=self.mac, public_keys=self.signer.public_keys,
-                                 password=str(data.get("password") or "not checked"),
-                                 expected_ndef=self.ndef if self.mode == WRITE else None,
-                                 lock_required=self.lock)
+        if self.mode == ERASE:
+            self.report = st.analyze_erased(self.uid, str(data.get("version", "")), str(data.get("pages", "")),
+                                            password=str(data.get("password") or "not checked"))
+        else:
+            self.report = st.analyze(self.mode, self.uid, str(data.get("version", "")), str(data.get("pages", "")),
+                                     device_mac=self.mac, public_keys=self.signer.public_keys,
+                                     password=str(data.get("password") or "not checked"),
+                                     expected_ndef=self.ndef if self.mode == WRITE else None,
+                                     lock_required=self.lock)
         if self.owner_check is not None:
             self.report.checks.insert(1, self.owner_check)
         if not data.get("ok"):
@@ -194,7 +232,10 @@ class NfcJob:
         """cmd/nfc_verdict: what the phone shows the operator."""
         r = self.report
         ok = bool(r and r.ok)
-        title = ("SIGNED STICKER WRITTEN AND VERIFIED" if self.mode == WRITE else "STICKER VERIFIED") if ok else "NOT VERIFIED"
+        if self.mode == ERASE:
+            title = "TAG ERASED - READY TO WRITE AGAIN" if ok else "TAG NOT ERASED"
+        else:
+            title = ("SIGNED STICKER WRITTEN AND VERIFIED" if self.mode == WRITE else "STICKER VERIFIED") if ok else "NOT VERIFIED"
         checks = [{"title": c.title, "state": c.state, "detail": c.detail} for c in (r.checks if r else [])]
         return {"job_id": self.job_id, "ok": ok, "mode": self.mode, "headline": title,
                 "uid": self.uid, "mac": self.mac, "seq": self.seq, "checks": checks,

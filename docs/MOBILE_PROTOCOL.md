@@ -74,7 +74,7 @@ publish under its **own** `M`; anything else is ignored.
 | station → phone | `cmd/verify_request` | `{"mac": "E9EBA0ED7C7C", "seq": "0001", "device_type": "UWB-K4W"}`: the device the PC just read. Show it and ask the operator to scan its sticker. |
 | station → phone | `cmd/scan_ack`   | `{"accepted": true, "reason": ""}` |
 | station → phone | `cmd/verify_result` | `{"ok": true, "mac": "E9EBA0ED7C7C", "seq": "0001", "reason": ""}`: the PC's verdict on the sticker |
-| station → phone | `cmd/nfc_job` | `{"job_id": "j-…", "mode": "write" \| "verify", "mac": "E9EBA0ED7C7C", "seq": "0001"}` (section 5) |
+| station → phone | `cmd/nfc_job` | `{"job_id": "j-…", "mode": "write" \| "erase" \| "verify", "mac": "E9EBA0ED7C7C", "seq": "0001"}` (section 5) |
 | phone → station | `evt/nfc_tag` | `{"job_id", "attempt", "uid", "version", "pages"}`: first touch of the tag |
 | station → phone | `cmd/nfc_job_reply` | `{"job_id", "ok", "reason", "write": {"page": 4, "data": "<hex>"} \| null, "pwd", "pack", "lock": false}` |
 | phone → station | `evt/nfc_progress` | `{"job_id", "step", "ok", "detail"}`: one per step, for the PC log |
@@ -120,6 +120,13 @@ When `cmd/nfc_job` arrives (ignore a repeat of the job that is already open):
    5. If `lock` is true (Settings › Lock tags, on by default) and the password was validated:
       WRITE CFG0+1 = `ACCESS & 0x38` + CFG1 bytes 1-3, then CFG0 = CFG0 bytes 0-2 + `02` (last),
       read CFG0 back → `locked`. Never lock with an unvalidated password; never lock bits or CFGLCK.
+   `mode` erase (Verification 1, make the tag new; `write.data` = the blank user area, `pwd`/`pack` =
+   the tag's current password):
+   1. If CFGLCK is set: stop. If protected: PWD_AUTH first (refused → stop, nothing changed).
+   2. WRITE only the pages of the user area that differ from `write.data`; read back, rewrite, max 3 rounds.
+   3. If it was protected: CFG0 = CFG0 bytes 0-2 + `FF` (unlocked - from here no password is needed).
+   4. CFG1 = `ACCESS & 0x38` + CFG1 bytes 1-3; PWD = `FFFFFFFF`, PACK = `0000 0000`.
+   5. Reconnect, PWD_AUTH `FFFFFFFF` must answer `0000` → `password: "default"`, else `"failed"`.
 5. `mode` verify (Verification 2): **nothing is written**. PWD_AUTH with `pwd`; a refusal halts
    the tag, so reconnect before the final read.
 6. READ every page again and publish `evt/nfc_done` (`ok:false` + `step` + `error` when a step
@@ -132,7 +139,8 @@ Closing the screen early sends `evt/nfc_done` with `ok:false`. `cmd/nfc_cancel` 
 
 The station judges the tag from the pages (`core/nfc_job.py`) and writes Verification 1 ›
 `NFC Written` or Verification 2 › `NFC Read` (Yes only if every check passed), plus Tag UID,
-Signature, Password and Locked.
+Signature, Password and Locked. After a successful erase of this device's tag it clears the
+blocks that named it: NFC = No, Tag UID empty, Signature `Erased`, Password and Locked empty.
 
 ## Testing without a phone
 

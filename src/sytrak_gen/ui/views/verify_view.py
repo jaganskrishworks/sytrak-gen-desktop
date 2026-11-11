@@ -24,7 +24,7 @@ except ImportError:  # older ttkbootstrap
     from ttkbootstrap.scrolled import ScrolledFrame
 
 from ...core import nfc_sticker as st
-from ...core.nfc_job import VERIFY, WRITE, JobError, NfcJob
+from ...core.nfc_job import ERASE, ERASED_FIELDS, VERIFY, WRITE, JobError, NfcJob
 from ...core.qr import compact_mac, format_seq, parse_payload, render_label
 from ...core.secrets import SecretError, load_signer
 from ...core.sheets import SheetRecord
@@ -37,7 +37,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 STEP_NAMES = {"tag": "Tag detected", "write": "Write", "readback": "Read back", "password": "Password set",
-              "pwd_auth": "Password check", "lock": "Lock", "read": "Read", "final read": "Final read"}
+              "pwd_auth": "Password check", "lock": "Lock", "read": "Read", "final read": "Final read",
+              "erase": "Erase", "unlock": "Unlock"}
 
 
 def device_duplicates(records: list[SheetRecord], mac: str) -> list[str]:
@@ -71,12 +72,25 @@ def sticker_check(qr_text: str, device_mac: str, expected_seq: int | None) -> tu
 def report_rows(job: NfcJob, phone: dict) -> list[tuple[str, str, str | None]]:
     """Label / value / style rows describing everything known about the tag."""
     r = job.report
-    rows: list[tuple[str, str, str | None]] = [
-        ("Job", f"Verification {job.group} · {'write signed sticker' if job.mode == WRITE else 'verify sticker (read only)'}"
-                f"  ·  {job.job_id}", None)]
+    rows: list[tuple[str, str, str | None]] = [("Job", f"{job.title}  ·  {job.job_id}", None)]
     if r is None:
         return rows
     good, bad = "success", "danger"
+    if job.mode == ERASE:
+        rows += [("Tag UID", r.uid or "—", None),
+                 ("Chip", f"{r.chip.name}  ·  {r.chip.user_bytes} B user memory" if r.chip else "unknown", None if r.chip else bad)]
+        if r.written is not None:
+            rows.append(("NDEF area", "✔ blank - empty NDEF message, like a new tag" if r.written
+                         else "✖ data is still on the tag", good if r.written else bad))
+        if r.config:
+            rows.append(("Lock", f"✔ removed - AUTH0 {r.config.auth0:02X} (open)" if not r.config.protected
+                         else f"✖ still locked - AUTH0 {r.config.auth0:02X}", good if not r.config.protected else bad))
+            rows.append(("Configuration", r.config.describe(), None))
+        rows.append(("Password", "✔ factory password FFFFFFFF / PACK 0000" if r.password == "default"
+                     else f"✖ {r.password}", good if r.password == "default" else bad))
+        rows.append(("Sheet", "Verification " + " and ".join(map(str, job.erase_groups)) + ": Tag UID cleared, "
+                     "NFC = No, Signature = Erased" if job.erase_groups else "not changed - the tag belonged to no device", None))
+        return rows
     rows += [
         ("Tag UID", r.uid or "—", None),
         ("Chip", f"{r.chip.name}  ·  {r.chip.user_bytes} B user memory  ·  CFG0 page {r.chip.cfg0}" if r.chip
@@ -262,6 +276,10 @@ class VerifyView(ttk.Frame):
         # One NFC button; what it does follows the Verification 1 / 2 switch.
         self.nfc_btn = ttk.Button(btns, text="", command=self._nfc_action)
         self.nfc_btn.grid(row=0, column=1, sticky="ew", padx=(5, 0), ipady=5)
+        # Verification 1 only: make a written tag new again (blank, unlocked, factory password).
+        self.erase_btn = ttk.Button(btns, text="⌫  Erase NFC tag  (make it new)", bootstyle="danger-outline",
+                                    command=lambda: self._nfc_action(erase=True))
+        self.erase_btn.grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(8, 0), ipady=2)
         self.sheet_lbl = ttk.Label(right, text="", style="Hint.TLabel", wraplength=560)
         self.sheet_lbl.grid(row=7, column=0, sticky="w", pady=(8, 0))
         right.bind("<Configure>", lambda e: self.sheet_lbl.configure(wraplength=max(250, e.width - 30)))
@@ -601,11 +619,13 @@ class VerifyView(ttk.Frame):
 
         job = self.job
         if job and job.state == "done":
-            text = ("✔  VERIFICATION 1 OK — SIGNED STICKER WRITTEN AND VERIFIED" if job.mode == WRITE
-                    else "✔  VERIFICATION 2 OK — STICKER SIGNATURE, MAC AND PASSWORD VALID")
+            text = {WRITE: "✔  VERIFICATION 1 OK — SIGNED STICKER WRITTEN AND VERIFIED",
+                    VERIFY: "✔  VERIFICATION 2 OK — STICKER SIGNATURE, MAC AND PASSWORD VALID",
+                    ERASE: "✔  TAG ERASED — like new, ready for a new signed sticker"}[job.mode]
             self.banner.configure(text=text, bootstyle="inverse-success")
         elif job and job.state == "failed":
-            self.banner.configure(text="✖  NFC STICKER NOT OK — see the NFC sticker details below", bootstyle="inverse-danger")
+            self.banner.configure(text="✖  TAG NOT ERASED — see the NFC sticker details below" if job.mode == ERASE
+                                  else "✖  NFC STICKER NOT OK — see the NFC sticker details below", bootstyle="inverse-danger")
         elif job and job.state == "working":
             self.banner.configure(text="⏳  Phone is working on the tag — keep it still", bootstyle="inverse-info")
         elif job and job.state == "waiting":
@@ -629,16 +649,20 @@ class VerifyView(ttk.Frame):
         same_mode_done = job is not None and job.group == group and job.state == "done"
         if group == 1:   # Verification 1: write the signed sticker, then everything is checked
             enabled = (auto or self.manual) and self._paired_online() and not busy_job
-            again = job is not None and job.group == 1 and job.state in ("failed", "cancelled", "done")
+            again = job is not None and job.mode == WRITE and job.state in ("failed", "cancelled", "done")
             self.nfc_btn.configure(text="①  Write signed sticker again" if again else "①  Write signed NFC sticker",
                                    bootstyle="success")
+            self.erase_btn.grid()
+            can_erase = self.device_mac is not None and self._paired_online() and not busy_job
+            self.erase_btn.configure(state="normal" if can_erase else "disabled")
         else:            # Verification 2: read the existing tag only
             enabled = self.device_mac is not None and self._paired_online() and not busy_job
             self.nfc_btn.configure(text="②  Verify NFC sticker again" if same_mode_done else "②  Verify NFC sticker  (read only)",
                                    bootstyle="info")
+            self.erase_btn.grid_remove()
         self.nfc_btn.configure(state="normal" if enabled else "disabled")
         busy = "busy" in (self.chk_device.state, self.chk_store.state)
-        nfc_ok = job is not None and job.state == "done"
+        nfc_ok = job is not None and job.state == "done" and job.mode != ERASE
         can_manual = self.device_mac is not None and not auto and not self.manual and not busy and not nfc_ok
         self.manual_btn.configure(state="normal" if can_manual else "disabled")
 
@@ -684,7 +708,8 @@ class VerifyView(ttk.Frame):
 
     # ------------------------------------------------------------- NFC job ---
 
-    def _nfc_action(self) -> None:
+    def _nfc_action(self, erase: bool = False) -> None:
+        """Start an NFC job on the paired phone: V1 write (or erase with ``erase``), V2 verify."""
         if not (self.app.station and self.device_mac):
             return
         if not self._paired_online():
@@ -698,10 +723,21 @@ class VerifyView(ttk.Frame):
             Messagebox.show_error(f"{exc}\n\nOpen Settings › NFC signing (secrets), choose the files "
                                   "(Browse… or From URL…) and click Save settings.", "NFC signing", parent=self)
             return
-        mode = WRITE if self.mode_var.get() == 1 else VERIFY
+        mode = ERASE if erase else WRITE if self.mode_var.get() == 1 else VERIFY
         if mode == WRITE and not self.record:
             Messagebox.show_warning("This MAC has no row in the selected sheet tab - generate its QR first.", "NFC", parent=self)
             return
+        if mode == ERASE:
+            answer = Messagebox.yesno(
+                "Erase the NFC tag tapped on the phone?\n\n"
+                "• the signed sticker data (MAC + signature) is removed\n"
+                "• the lock and the tag password are removed (factory password)\n"
+                f"• if it is the tag of MAC {compact_mac(self.device_mac)}, its Verification 1/2 tag columns "
+                "in the sheet are cleared, so the device can get a new tag\n\n"
+                "Another device's tag is refused. The tag can then be written again as a new one.",
+                "Erase NFC tag", parent=self)
+            if answer not in ("Yes", "yes", True):
+                return
         if self.job and self.job.active:
             self._cancel_job("a new NFC job was started")
         seq = self.record.seq_text if self.record else ""
@@ -712,7 +748,8 @@ class VerifyView(ttk.Frame):
             self.job = None
             Messagebox.show_warning("Connect a mobile first.", "NFC", parent=self)
             return
-        what = "write the signed sticker" if mode == WRITE else "verify the sticker (read only)"
+        what = {WRITE: "write the signed sticker", VERIFY: "verify the sticker (read only)",
+                ERASE: "ERASE the tag (blank, unlocked, factory password)"}[mode]
         dev = " (DEV signing key)" if signer.is_dev else ""
         self.console.write(f"NFC job {self.job.job_id}: Verification {self.job.group}, {what} for MAC {self.job.mac}"
                            f"{' / SEQ ' + seq if seq else ''}{dev} - tap the tag on the phone", "accent")
@@ -820,7 +857,11 @@ class VerifyView(ttk.Frame):
             for c in report.checks:
                 level = {"ok": "success", "fail": "error"}.get(c.state, "muted")
                 self.console.write(f"  {'✔' if c.state == 'ok' else '✖' if c.state == 'fail' else '·'} {c.title}: {c.detail}", level)
-        if job.state == "done":
+        if job.state == "done" and job.mode == ERASE:
+            self.chk_nfc.set("info", f"Tag {job.uid} erased: blank, unlocked, factory password - write a new signed sticker")
+            self.console.write(f"Tag {job.uid} erased - it is like new", "success")
+            self.app.set_status(f"Tag {job.uid} erased")
+        elif job.state == "done":
             self.chk_nfc.set("ok", f"Tag {job.uid}: signature valid · MAC = device · password validated · "
                                    f"locked {'Yes' if report.locked else 'No'}")
             self.console.write(f"{name} OK: NFC sticker {job.uid} for MAC {job.mac}", "success")
@@ -828,9 +869,20 @@ class VerifyView(ttk.Frame):
         else:
             why = job.error or "; ".join(f"{c.title}: {c.detail}" for c in (report.failures if report else []))
             self.chk_nfc.set("fail", why[:300])
-            self.console.write(f"{name} NOT OK: {why}", "error")
+            self.console.write(f"{'Erase' if job.mode == ERASE else name} NOT OK: {why}", "error")
 
-        if report is not None and self.record and job.mac == compact_mac(self.device_mac or ""):
+        same_device = self.record and job.mac == compact_mac(self.device_mac or "")
+        if job.mode == ERASE:
+            # Only a finished erase frees the tag in the sheet (a failed one leaves the data on it).
+            if report is not None and report.ok and job.erase_groups and same_device:
+                for group in job.erase_groups:
+                    self._mark_sheet(group, "tag erased (Tag UID cleared, NFC = No)", **ERASED_FIELDS)
+                sheet_note = "Clearing the tag in the sheet…"
+            elif report is not None and report.ok:
+                sheet_note = "Sheet not changed - the tag belonged to no device"
+            else:
+                sheet_note = "Sheet not changed - the tag was not erased"
+        elif report is not None and same_device:
             column = "NFC Written" if job.mode == WRITE else "NFC Read"
             self._mark_sheet(job.group, f"{column} + tag details", nfc=report.ok, **report.sheet_values())
             sheet_note = "Saving to the sheet…"
@@ -884,10 +936,10 @@ class VerifyView(ttk.Frame):
             return
         state_text = {"waiting": "⏳ waiting for the tag to be tapped on the phone",
                       "working": f"⏳ the phone is working on tag {job.uid}",
-                      "done": "✔ all checks passed", "failed": "✖ NOT OK", "cancelled": f"cancelled - {job.error}"}[job.state]
+                      "done": "✔ erased - the tag is like new" if job.mode == ERASE else "✔ all checks passed",
+                      "failed": "✖ NOT OK", "cancelled": f"cancelled - {job.error}"}[job.state]
         style = {"done": "success", "failed": "danger", "cancelled": "warning"}.get(job.state, "info")
-        title = "Verification 1 · write signed sticker" if job.mode == WRITE else "Verification 2 · verify sticker"
-        self.job_lbl.configure(text=f"{title}  ·  MAC {job.mac}  ·  {state_text}", bootstyle=style)
+        self.job_lbl.configure(text=f"{job.title}  ·  MAC {job.mac}  ·  {state_text}", bootstyle=style)
         if job.active:
             self.cancel_btn.grid()
         else:

@@ -132,7 +132,9 @@ def main() -> int:
             pwd = b"\x00\x00\x00\x00"
         if args.tag_dropout:
             tag.drop_write_at = {args.tag_dropout}
-        if reply.get("write"):
+        if job.get("mode") == "erase":
+            result = driver.erase_job(bytes.fromhex(reply["write"]["data"]), pwd, pack)
+        elif reply.get("write"):
             result = driver.write_job(bytes.fromhex(reply["write"]["data"]), pwd, pack, lock=bool(reply.get("lock")))
         else:
             result = driver.verify_job(pwd, pack)

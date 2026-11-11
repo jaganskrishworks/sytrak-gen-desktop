@@ -326,6 +326,84 @@ class TagReport:
         return lines
 
 
+# ------------------------------------------------------------------ erase ---
+
+EMPTY_NDEF = bytes([0x03, 0x00, 0xFE, 0x00])      # empty NDEF message + terminator, as on a new tag
+FACTORY_PWD, FACTORY_PACK = b"\xFF\xFF\xFF\xFF", b"\x00\x00"
+
+
+def blank_user_area(chip: Chip) -> bytes:
+    """What an erased tag holds from page 4: an empty NDEF message, then zeros."""
+    return EMPTY_NDEF + bytes(chip.user_bytes - len(EMPTY_NDEF))
+
+
+def lock_bits_problem(pages: bytes, chip: Chip) -> str:
+    """Static (page 2) or dynamic (CFG0-1) lock bits make pages read-only for ever ("" = none set)."""
+    dyn = (chip.cfg0 - 1) * PAGE
+    if len(pages) >= 12 and (pages[10] or pages[11]):
+        return f"static lock bits are set (page 2: {pages[8:12].hex(' ').upper()}) - pages are read-only for ever"
+    if len(pages) >= dyn + 3 and any(pages[dyn:dyn + 3]):
+        return f"dynamic lock bits are set (page {chip.cfg0 - 1}: {pages[dyn:dyn + 4].hex(' ').upper()})"
+    return ""
+
+
+def analyze_erased(uid: str, version_hex: str, pages_hex: str, password: str = "not checked") -> TagReport:
+    """Judge a tag after an erase: blank NDEF area, open (AUTH0 FF), factory password.
+
+    ``password``: "default" = PWD_AUTH with FFFFFFFF answered PACK 0000 (the phone checks it)."""
+    r = TagReport(mode="erase", uid=str(uid).upper(), password=password)
+    add = r.checks.append
+    try:
+        r.version = hexbytes(version_hex) if version_hex else b""
+        r.pages = hexbytes(pages_hex) if pages_hex else b""
+    except StickerError as exc:
+        add(Check("Tag data", FAIL, f"phone sent bad data: {exc}"))
+        return r
+    r.chip = CHIPS.get(r.version[6]) if len(r.version) >= 8 else None
+    add(Check("Tag UID", OK if is_hex(r.uid, 7) else FAIL, r.uid or "—"))
+    if r.chip is None:
+        add(Check("Chip", FAIL, f"not an NTAG213/215/216 (GET_VERSION {r.version.hex(' ').upper() or 'none'})"))
+        return r
+    add(Check("Chip", OK, f"{r.chip.name}, {r.chip.user_bytes} B user memory"))
+    if len(r.pages) < (r.chip.last_page + 1) * PAGE:
+        add(Check("Tag memory", FAIL, "the phone could not read the whole tag after erasing"))
+        return r
+
+    start = NDEF_START_PAGE * PAGE
+    user = r.pages[start:start + r.chip.user_bytes]
+    blank = blank_user_area(r.chip)
+    if user == blank:
+        add(Check("SyTrak data removed", OK, "MAC and signature records are gone"))
+        add(Check("NDEF area", OK, f"empty NDEF message, {r.chip.user_bytes} B blank - like a new tag"))
+    else:
+        left = sum(1 for i in range(0, len(blank), PAGE) if user[i:i + PAGE] != blank[i:i + PAGE])
+        msg, _problem = find_ndef(user)
+        has_data = bool(msg)
+        add(Check("SyTrak data removed", FAIL if has_data else OK,
+                  "an NDEF message is still on the tag" if has_data else "no NDEF records left"))
+        add(Check("NDEF area", FAIL, f"{left} page(s) are not blank - erase again"))
+    r.written = user == blank
+
+    c = r.chip.cfg0 * PAGE
+    r.config = TagConfig(r.pages[c:c + 4], r.pages[c + 4:c + 8], r.chip)
+    cfg = r.config
+    add(Check("Lock removed", OK if not cfg.protected else FAIL,
+              f"open - AUTH0 {cfg.auth0:02X}, anyone can write it again" if not cfg.protected
+              else f"still locked - AUTH0 {cfg.auth0:02X}"))
+    add(Check("Access bits", OK if not (cfg.prot or cfg.authlim) else FAIL,
+              f"ACCESS {cfg.access:02X} (PROT {int(cfg.prot)}, AUTHLIM {cfg.authlim})"))
+    if cfg.cfglck:
+        add(Check("Configuration", FAIL, "CFGLCK is set - the configuration is frozen"))
+    pw = {"default": (OK, "factory password FFFFFFFF answers PACK 0000"),
+          "failed": (FAIL, "the factory password FFFFFFFF was refused - the old password is still set"),
+          "not checked": (FAIL, "not checked (the erase did not reach this step)")}
+    state, detail = pw.get(password, (FAIL, password))
+    add(Check("Password reset", state, detail))
+    problem = lock_bits_problem(r.pages, r.chip)
+    add(Check("Lock bits", FAIL if problem else OK, problem or "none set - every page stays writable"))
+    return r
+
+
 def analyze(mode: str, uid: str, version_hex: str, pages_hex: str, *, device_mac: str,
             public_keys: dict[int, ec.EllipticCurvePublicKey], password: str = "not checked",
             expected_ndef: bytes | None = None, lock_required: bool = False) -> TagReport:
