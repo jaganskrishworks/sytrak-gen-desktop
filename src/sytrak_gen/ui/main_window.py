@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 
 import ttkbootstrap as ttk
 from ttkbootstrap.dialogs import Messagebox
@@ -18,6 +19,7 @@ from .dispatcher import UiDispatcher
 from .probe_bar import ProbeBar
 from .theme import PAD, SUBTITLE_FONT, THEME, TITLE_FONT, configure_styles
 from .views.generate_view import GenerateView
+from .views.mqtt_view import MqttView
 from .views.settings_view import SettingsView
 from .views.verify_view import VerifyView
 from .widgets import StatusPill
@@ -50,10 +52,17 @@ class MainWindow(ttk.Window):
         self.notebook.pack(fill="both", expand=True, padx=PAD, pady=(PAD, 0))
         self.generate_view = GenerateView(self.notebook, self)
         self.verify_view = VerifyView(self.notebook, self)
+        self.mqtt_view = MqttView(self.notebook, self)
         self.settings_view = SettingsView(self.notebook, self)
         self.notebook.add(self.generate_view, text="   Generate QR   ")
         self.notebook.add(self.verify_view, text="   Verify QR   ")
+        self.notebook.add(self.mqtt_view, text="   MQTT   ")
         self.notebook.add(self.settings_view, text="   Settings   ")
+        # Developer option: the MQTT tab stays hidden until the title is clicked 10 times
+        # (it still records in the background, so it shows the history once enabled).
+        self.notebook.hide(self.mqtt_view)
+        self.dev_mode = False
+        self._dev_taps: list[float] = []
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.place_window_center()
@@ -79,7 +88,9 @@ class MainWindow(ttk.Window):
         header.pack(fill="x")
         titles = ttk.Frame(header, bootstyle="primary")
         titles.pack(side="left")
-        ttk.Label(titles, text=APP_TITLE, font=TITLE_FONT, bootstyle="inverse-primary").pack(anchor="w")
+        self.title_lbl = ttk.Label(titles, text=APP_TITLE, font=TITLE_FONT, bootstyle="inverse-primary")
+        self.title_lbl.pack(anchor="w")
+        self.title_lbl.bind("<Button-1>", lambda _e: self._dev_tap())
         ttk.Label(titles, text="Device MAC → QR → Verify → NFC", font=SUBTITLE_FONT, bootstyle="inverse-primary").pack(anchor="w")
         pills = ttk.Frame(header, bootstyle="primary")
         pills.pack(side="right")
@@ -97,6 +108,34 @@ class MainWindow(ttk.Window):
         self.status_lbl.pack(side="left")
         ttk.Label(bar, text=f"v{__version__}", style="Hint.TLabel").pack(side="right")
 
+    # ---------------------------------------------------- developer options ---
+
+    DEV_TAPS = 10
+    DEV_TAP_GAP_S = 1.5     # a longer pause between clicks starts the count again
+
+    def _dev_tap(self) -> None:
+        """Click the title 10 times in a row to show the MQTT tab (developer option)."""
+        if self.dev_mode:
+            self.set_status("Developer options are already enabled")
+            return
+        now = time.monotonic()
+        if self._dev_taps and now - self._dev_taps[-1] > self.DEV_TAP_GAP_S:
+            self._dev_taps.clear()
+            if "developer options" in self.status_lbl.cget("text"):
+                self.set_status("Ready")      # the old countdown no longer applies
+        self._dev_taps.append(now)
+        left = self.DEV_TAPS - len(self._dev_taps)
+        if left > 0:
+            if len(self._dev_taps) >= 5:   # like Android: hint only near the end
+                self.set_status(f"{left} more click{'s' if left != 1 else ''} to enable developer options")
+            return
+        self.dev_mode = True
+        self._dev_taps.clear()
+        self.notebook.add(self.mqtt_view)            # re-shows the hidden tab in its place
+        self.notebook.select(self.mqtt_view)
+        self.set_status("Developer options enabled: MQTT tab (until the app is closed)")
+        log.info("Developer options enabled (MQTT tab)")
+
     # ------------------------------------------------------------ station ---
 
     def start_station(self) -> None:
@@ -106,12 +145,15 @@ class MainWindow(ttk.Window):
             discovery_port=s.station.discovery_port, password=s.station.password,
             on_event=lambda kind, data: self.dispatcher.post(self.verify_view.handle_event, kind, data),
         )
+        # MQTT tab: every message / client event, marshalled onto the UI thread
+        self.station.broker.on_traffic = lambda kind, info: self.dispatcher.post(self.mqtt_view.on_traffic, kind, info)
         try:
             self.station.start()
         except OSError as exc:
             log.error("Broker failed to start: %s", exc)
             self.station = None
             self.station_running = False
+            self.mqtt_view.set_broker(f"port {s.station.broker_port}", f"not running: {exc.strerror or exc}", running=False)
             self.station_pill.set(f"Station  port {s.station.broker_port} in use", "danger")
             self.verify_view.set_station_info(
                 f"✖  Could not start the mobile server on port {s.station.broker_port} ({exc.strerror or exc}). "
@@ -122,6 +164,7 @@ class MainWindow(ttk.Window):
         self.station_running = True
         ip = primary_ipv4() or "?"
         self.station_pill.set(f"Station  {s.station_name}  ·  {ip}:{s.station.broker_port}", "success")
+        self.mqtt_view.set_broker(f"{ip}:{s.station.broker_port}", f"sytrak/{s.station_id}/#")
         others = [a for a in local_ipv4_addresses() if a != ip]
         auth = f"   ·   login {BROKER_USERNAME} / ••••" if s.station.password else ""
         self.verify_view.set_station_info(

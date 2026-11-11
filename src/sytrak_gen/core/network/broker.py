@@ -114,6 +114,9 @@ class EmbeddedBroker:
         self.host, self.port = host, port
         self.username, self.password = username, password
         self.on_connect, self.on_disconnect, self.on_publish = on_connect, on_disconnect, on_publish
+        # Monitoring (MQTT tab): on_traffic(kind, info) for "message", "connect", "disconnect",
+        # "subscribe", "unsubscribe" - called on the broker thread, must not block.
+        self.on_traffic: Callable[[str, dict], None] | None = None
         self._clients: dict[str, _Client] = {}
         self._retained: dict[str, tuple[bytes, int]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -155,6 +158,15 @@ class EmbeddedBroker:
     def client_ids(self) -> list[str]:
         return list(self._clients)
 
+    def _traffic(self, kind: str, **info) -> None:
+        hook = self.on_traffic
+        if hook is None:
+            return
+        try:
+            hook(kind, info)
+        except Exception:
+            log.exception("on_traffic hook failed")
+
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
@@ -190,7 +202,10 @@ class EmbeddedBroker:
 
     # ------------------------------------------------------------ routing ---
 
-    def _route(self, topic: str, payload: bytes, qos: int, retain: bool) -> None:
+    def _route(self, topic: str, payload: bytes, qos: int, retain: bool,
+               source: str = "", kind: str = "station") -> None:
+        """Deliver to subscribers. source = publishing client id ("" = this app); kind = station|client|will."""
+        self._traffic("message", topic=topic, payload=payload, qos=qos, retain=retain, source=source, origin=kind)
         if retain:
             if payload:
                 self._retained[topic] = (payload, qos)
@@ -246,8 +261,9 @@ class EmbeddedBroker:
         finally:
             if client and self._clients.get(client.id) is client:
                 del self._clients[client.id]
+                self._traffic("disconnect", id=client.id, clean=clean_exit)
                 if client.will and not clean_exit:
-                    self._route(*client.will)
+                    self._route(*client.will, source=client.id, kind="will")
                 log.info("MQTT client disconnected: %s", client.id)
                 if self.on_disconnect:
                     self.on_disconnect(client.id)
@@ -290,6 +306,8 @@ class EmbeddedBroker:
         self._clients[client_id] = client
         writer.write(_packet(CONNACK << 4, b"\x00\x00"))
         log.info("MQTT client connected: %s from %s", client_id, address)
+        self._traffic("connect", id=client_id, address=address, keepalive=keepalive,
+                      will=will[0] if will else "", takeover=bool(old))
         if self.on_connect:
             self.on_connect(client_id, address)
         return client, keepalive
@@ -302,7 +320,7 @@ class EmbeddedBroker:
             pos += 2
             client.send(_packet((PUBACK if qos == 1 else PUBREC) << 4, pid))
         topic, payload = raw_topic.decode(), body[pos:]
-        self._route(topic, payload, qos, retain)
+        self._route(topic, payload, qos, retain, source=client.id, kind="client")
         if self.on_publish:
             try:
                 self.on_publish(client.id, topic, payload)
@@ -320,6 +338,7 @@ class EmbeddedBroker:
             granted.append(qos)
             filters.append((raw.decode(), qos))
         client.send(_packet((SUBACK << 4), pid + bytes(granted)))
+        self._traffic("subscribe", id=client.id, filters=[f for f, _q in filters])
         for filt, qos in filters:
             for topic, (payload, msg_qos) in self._retained.items():
                 if topic_matches(filt, topic):
@@ -327,7 +346,10 @@ class EmbeddedBroker:
 
     def _on_unsubscribe(self, client: _Client, body: bytes) -> None:
         pid, pos = body[:2], 2
+        removed = []
         while pos < len(body):
             raw, pos = _read_str(body, pos)
             client.subs.pop(raw.decode(), None)
+            removed.append(raw.decode())
         client.send(_packet(UNSUBACK << 4, pid))
+        self._traffic("unsubscribe", id=client.id, filters=removed)

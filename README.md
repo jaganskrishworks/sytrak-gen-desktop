@@ -306,6 +306,31 @@ Each PC is its own station. Phones pick their station from the list, and each st
 with one phone. SEQs stay unique per sheet tab even when several stations save at the same
 moment.
 
+### 8.5 MQTT tab (developer option)
+
+The MQTT tab is hidden. To show it, click the **SyTrak Gen** title in the top-left corner
+**10 times in a row** (no more than 1.5 s between clicks). From the 5th click the status bar
+counts down. The tab then stays visible until the app is closed, and is hidden again at the
+next start. It records in the background from the start, so the messages from before you
+enabled it are already there.
+
+The **MQTT** tab shows every message between this PC and the phones as a topic tree, like
+MQTT Explorer:
+
+* **Topics:** expand or collapse each level (`sytrak › <station> › mobile › <phone> › cmd / evt / status`).
+  Each topic shows its latest value, message count and time, and flashes yellow when a message arrives.
+  Colours show the direction: blue = PC → phone, green = phone → PC, orange = last will (phone lost).
+* **Message:** click a topic to see its direction, client (and whether it is the paired phone),
+  QoS, retained flag, time, size and the payload as formatted JSON.
+* **History:** the last 100 messages of that topic. Click one to view it; *Show latest* goes back.
+* **Clients:** each connected phone with its address, online or offline, paired, connected time,
+  messages sent and subscriptions.
+* **Toolbar:** *Filter* (topic or value text), *Pause / Resume*, *Expand / Collapse all*,
+  *Clear*, and *Save…* (all messages as a JSON file).
+
+Tag passwords (`pwd` / `pack` in `nfc_job_reply`) are replaced by `•••• (hidden)` before they
+are stored, so they never show on screen or in a saved file.
+
 ---
 
 ## 9. Build the standalone exe
