@@ -33,20 +33,20 @@ log = logging.getLogger(__name__)
 
 # --- page -------------------------------------------------------------------
 PAGE_W, PAGE_H = 595, 842          # A4
-MARGIN_LEFT, MARGIN_TOP = 25, 31   # page edge to the outer edge of the first box's border
+MARGIN_LEFT, MARGIN_TOP = 45, 41   # page edge to the outer edge of the first box's border
 GAP_X, GAP_Y = 0, 0                # space between neighbouring boxes; 0 = edge to edge (shared border line)
 
 # --- one label box ----------------------------------------------------------
-BOX = 68.03
-BORDER = 0.75                      # solid #000000, outside the box
-RADIUS = 13.44                     # corner radius of the border's outer edge (like CSS border-radius)
-LOGO_W, LOGO_H = 17.51, 6.14
-SPACER_LOGO_QR = 1.54
-QR_SIZE = 47.02
-SPACER_QR_TEXT = 3.53
+BOX = 62.36
+BORDER = 0.69                      # solid #000000, outside the box
+RADIUS = 0                     # corner radius of the border's outer edge (like CSS border-radius)
+LOGO_W, LOGO_H = 16.05, 5.63
+SPACER_LOGO_QR = 1.41
+QR_SIZE = 43.11
+SPACER_QR_TEXT = 3.23
 FONT_FILE = "IBMPlexSans-Medium.ttf"
-FONT_SIZE = 3.93
-LINE_HEIGHT = 5.98
+FONT_SIZE = 3.6
+LINE_HEIGHT = 5.48
 
 OUTER = BOX + 2 * BORDER           # box including its border (79.67)
 
