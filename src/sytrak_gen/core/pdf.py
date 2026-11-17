@@ -37,15 +37,16 @@ MARGIN_LEFT, MARGIN_TOP = 25, 31   # page edge to the outer edge of the first bo
 GAP_X, GAP_Y = 0, 0                # space between neighbouring boxes; 0 = edge to edge (shared border line)
 
 # --- one label box ----------------------------------------------------------
-BOX = 77.95
-BORDER = 0.86                      # solid #000000, outside the box
-LOGO_W, LOGO_H = 20.07, 7.04
-SPACER_LOGO_QR = 1.76
-QR_SIZE = 53.88
-SPACER_QR_TEXT = 2.69
+BOX = 68.03
+BORDER = 0.75                      # solid #000000, outside the box
+RADIUS = 13.44                     # corner radius of the border's outer edge (like CSS border-radius)
+LOGO_W, LOGO_H = 17.51, 6.14
+SPACER_LOGO_QR = 1.54
+QR_SIZE = 47.02
+SPACER_QR_TEXT = 3.53
 FONT_FILE = "IBMPlexSans-Medium.ttf"
-FONT_SIZE = 4.5
-LINE_HEIGHT = 6.85
+FONT_SIZE = 3.93
+LINE_HEIGHT = 5.98
 
 OUTER = BOX + 2 * BORDER           # box including its border (79.67)
 
@@ -119,10 +120,15 @@ def _draw_qr(c: canvas.Canvas, payload: str, x: float, top: float) -> None:
 
 def _draw_label(c: canvas.Canvas, record: SheetRecord, box_x: float, box_top: float) -> None:
     # Border: stroke centred on a line BORDER/2 outside the box, so it is fully outside.
+    # Rounded corners: the outer edge of the border has radius RADIUS, so the stroke's
+    # centre line uses RADIUS - BORDER/2 (inner edge then has RADIUS - BORDER, as in CSS).
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(BORDER)
     half = BORDER / 2
-    c.rect(box_x - half, PAGE_H - (box_top + BOX + half), BOX + BORDER, BOX + BORDER, stroke=1, fill=0)
+    c.roundRect(
+        box_x - half, PAGE_H - (box_top + BOX + half), BOX + BORDER, BOX + BORDER,
+        max(RADIUS - half, 0), stroke=1, fill=0,
+    )
 
     centre_x = box_x + BOX / 2
     y = box_top + (BOX - CONTENT_H) / 2  # top of the content block (top-down)
