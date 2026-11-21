@@ -399,6 +399,7 @@ The build is signed with the debug key, which is fine for in-house phones. Play 
 .venv\Scripts\python.exe -m pytest -q tests                 :: unit + broker tests
 .venv\Scripts\python.exe tools\mobile_sim.py --auto-sticker :: fake phone (needs paho-mqtt)
 .venv\Scripts\python.exe tools\mock_pdf.py --open           :: label PDF from random MACs, no sheet needed
+.venv\Scripts\python.exe tools\mock_anchor_pdf.py --open    :: anchor sticker PDF (6 samples; --sheet / --file / --count)
 .venv\Scripts\python.exe tools\make_icon.py                 :: rebuild app icons from company-logo.png
 ```
 

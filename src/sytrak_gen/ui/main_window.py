@@ -18,6 +18,7 @@ from ..paths import asset_path
 from .dispatcher import UiDispatcher
 from .probe_bar import ProbeBar
 from .theme import PAD, SUBTITLE_FONT, THEME, TITLE_FONT, configure_styles
+from .views.anchor_view import AnchorView
 from .views.generate_view import GenerateView
 from .views.mqtt_view import MqttView
 from .views.settings_view import SettingsView
@@ -45,7 +46,8 @@ class MainWindow(ttk.Window):
         self._build_header()
         self.probe_bar = ProbeBar(self, self)
         self.probe_bar.pack(fill="x")
-        ttk.Separator(self).pack(fill="x")
+        self._probe_sep = ttk.Separator(self)
+        self._probe_sep.pack(fill="x")
         self._build_statusbar()
 
         self.notebook = ttk.Notebook(self, bootstyle="primary")
@@ -63,10 +65,30 @@ class MainWindow(ttk.Window):
         self.notebook.hide(self.mqtt_view)
         self.dev_mode = False
         self._dev_taps: list[float] = []
+        # Anchor stickers: a separate product, shown instead of the tag screens (header switch).
+        self.anchor_view = AnchorView(self, self)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.place_window_center()
         self.after(100, self.start_station)
+
+    # ------------------------------------------------------- product switch ---
+
+    def _show_product(self) -> None:
+        """Header switch: Tag = the existing screens, Anchor = the anchor sticker screen."""
+        if self.product_var.get() == "anchor":
+            self.probe_bar.pack_forget()
+            self._probe_sep.pack_forget()
+            self.notebook.pack_forget()
+            self.anchor_view.pack(fill="both", expand=True, padx=PAD, pady=(PAD, 0), after=self.header)
+            self.anchor_view.on_show()
+            self.set_status("Anchor QR: stickers from the anchor Google Sheet")
+        else:
+            self.anchor_view.pack_forget()
+            self.probe_bar.pack(fill="x", after=self.header)
+            self._probe_sep.pack(fill="x", after=self.probe_bar)
+            self.notebook.pack(fill="both", expand=True, padx=PAD, pady=(PAD, 0), after=self._probe_sep)
+            self.set_status("Ready")
 
     # ------------------------------------------------------------- layout ---
 
@@ -84,7 +106,7 @@ class MainWindow(ttk.Window):
             log.warning("Could not set window icon", exc_info=True)
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self, bootstyle="primary", padding=(20, 12))
+        self.header = header = ttk.Frame(self, bootstyle="primary", padding=(20, 12))
         header.pack(fill="x")
         titles = ttk.Frame(header, bootstyle="primary")
         titles.pack(side="left")
@@ -92,6 +114,13 @@ class MainWindow(ttk.Window):
         self.title_lbl.pack(anchor="w")
         self.title_lbl.bind("<Button-1>", lambda _e: self._dev_tap())
         ttk.Label(titles, text="Device MAC → QR → Verify → NFC", font=SUBTITLE_FONT, bootstyle="inverse-primary").pack(anchor="w")
+        # Product switch, top right: Tag (existing screens) | Anchor (anchor stickers)
+        switch = ttk.Frame(header, bootstyle="primary")
+        switch.pack(side="right", padx=(16, 0))
+        self.product_var = ttk.StringVar(value="tag")
+        for value, text in (("tag", "  Tag  "), ("anchor", "  Anchor  ")):
+            ttk.Radiobutton(switch, text=text, value=value, variable=self.product_var,
+                            bootstyle="light-toolbutton", command=self._show_product).pack(side="left")
         pills = ttk.Frame(header, bootstyle="primary")
         pills.pack(side="right")
         self.mobile_pill = StatusPill(pills, "Mobile  not connected", "light")

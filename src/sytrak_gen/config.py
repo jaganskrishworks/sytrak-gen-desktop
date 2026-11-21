@@ -48,6 +48,13 @@ class SheetSettings:
 
 
 @dataclass
+class AnchorSettings:
+    """Anchor stickers (separate product): their own Google Sheet, read only."""
+    url: str = "https://docs.google.com/spreadsheets/d/1w5JeEK6flaaTu4joZSx-0YFRTlZwXTyOwhzDfpUdsVk/edit?gid=0#gid=0"
+    tab: str = ""  # empty -> the tab in the URL (gid) or the first tab
+
+
+@dataclass
 class NfcSettings:
     """Signed NFC sticker secrets (paths of the private copies; the URL only records where they came from)."""
     key_file: str = ""      # empty -> secrets/*.pem next to the app, or <data folder>/secrets/nfc_signing_key.pem
@@ -103,6 +110,7 @@ class Settings:
     station: StationSettings = field(default_factory=StationSettings)
     sheet: SheetSettings = field(default_factory=SheetSettings)
     nfc: NfcSettings = field(default_factory=NfcSettings)
+    anchor: AnchorSettings = field(default_factory=AnchorSettings)
 
     @staticmethod
     def path() -> Path:
@@ -131,6 +139,7 @@ class Settings:
             station=_from_dict(StationSettings, data.get("station")),
             sheet=_from_dict(SheetSettings, data.get("sheet")),
             nfc=_from_dict(NfcSettings, data.get("nfc")),
+            anchor=_from_dict(AnchorSettings, data.get("anchor")),
         )
 
     def save(self) -> None:
